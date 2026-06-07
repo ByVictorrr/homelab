@@ -1,0 +1,24 @@
+---
+# Cluster-wide variables. Override per host/group as needed.
+
+# k3s
+k3s_install_url: "https://get.k3s.io"
+k3s_version: ""              # empty = latest stable. Pin like "v1.31.0+k3s1" once you've chosen one.
+k3s_server_args: "--write-kubeconfig-mode 644 --disable traefik"
+
+# Where the kubeconfig from rpi-control should land on your laptop.
+kubeconfig_local_path: "{{ lookup('env','HOME') }}/.kube/config-homelab"
+
+# Address that ends up in the kubeconfig + the k3s agent join URL.
+# Default = the CP's inventory hostname (e.g. rpi-control.local). Override with an
+# IP or a real DNS name if .local mDNS isn't reliable on your network. Examples:
+#   cluster_endpoint: 192.168.1.10
+#   cluster_endpoint: rpi-control.lan
+cluster_endpoint: "{{ hostvars[groups['k3s_server'][0]].ansible_host
+                       | default(groups['k3s_server'][0]) }}"
+
+# Rancher
+rancher_namespace: cattle-system
+rancher_bootstrap_password: "rancher-init-change-me"   # override on the CLI: -e rancher_bootstrap_password=...
+rancher_hostname: ""          # empty = auto-compute as rancher.<rpi-control-ip>.nip.io
+rancher_chart_version: ""     # empty = latest stable

@@ -1,0 +1,257 @@
+---
+# Full provisioning playbook for the rpi k3s homelab.
+#
+# Usage:
+#   ansible-playbook site.yml                       # full run
+#   ansible-playbook site.yml --tags prep           # OS prep only
+#   ansible-playbook site.yml --tags k3s            # prep + k3s install
+#   ansible-playbook site.yml --tags rancher        # Rancher install only
+#   ansible-playbook site.yml --limit rpi-node1     # one host only
+#
+# First-time prerequisites on your laptop:
+#   sudo apt install -y ansible
+#   ansible-galaxy collection install kubernetes.core community.general
+#   ansible -i inventory.ini all -m ping            # smoke test SSH
+
+- name: Base OS prep on every Pi
+  hosts: k3s_cluster
+  become: true
+  gather_facts: true
+  tags: [prep, k3s, all]
+  tasks:
+    - name: apt update + safe upgrade
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: safe
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - ca-certificates
+          - open-iscsi
+          - nfs-common
+          - avahi-daemon          # so .local hostnames resolve between Pis
+          - libnss-mdns
+        state: present
+
+    - name: Manage /etc/hosts entries for every cluster node
+      # Drops an Ansible-managed block on every Pi that maps rpi-control,
+      # rpi-node1, etc. to their LAN IPs. Robust even if mDNS / DNS flake.
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED rpi-cluster"
+        block: |
+          {% for host in groups['k3s_cluster'] %}
+          {{ hostvars[host].ansible_default_ipv4.address }} {{ host }} {{ host }}.local
+          {% endfor %}
+
+    - name: Enable iscsid (for future Longhorn)
+      ansible.builtin.systemd:
+        name: iscsid
+        enabled: true
+        state: started
+
+    - name: Disable swap (runtime)
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+
+    - name: Disable swap (persistent in /etc/fstab)
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\sswap\s.*)$'
+        replace: '#\1'
+
+    - name: Verify memory cgroups are enabled
+      ansible.builtin.command: awk '/^memory/ {print $4}' /proc/cgroups
+      register: cgroup_check
+      changed_when: false
+
+    - name: Fail if memory cgroup is not enabled
+      ansible.builtin.assert:
+        that: cgroup_check.stdout == '1'
+        fail_msg: >-
+          memory cgroup not enabled on {{ inventory_hostname }}.
+          Add 'cgroup_memory=1 cgroup_enable=memory' to /boot/firmware/cmdline.txt and reboot.
+
+- name: Install k3s server on rpi-control
+  hosts: k3s_server
+  become: true
+  tags: [k3s, k3s-server, all]
+  tasks:
+    - name: Check if k3s binary already present
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s
+      register: k3s_bin
+
+    - name: Run k3s server install
+      ansible.builtin.shell: |
+        curl -sfL {{ k3s_install_url }} | \
+        {% if k3s_version %}INSTALL_K3S_VERSION={{ k3s_version }} {% endif %}sh -s - server {{ k3s_server_args }}
+      args:
+        executable: /bin/bash
+      when: not k3s_bin.stat.exists
+      register: k3s_install
+      changed_when: k3s_install.rc == 0
+
+    - name: Wait for node-token file
+      ansible.builtin.wait_for:
+        path: /var/lib/rancher/k3s/server/node-token
+        timeout: 120
+
+    - name: Read node-token
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_token_b64
+
+    - name: Stash token as a fact (visible to other plays via hostvars)
+      ansible.builtin.set_fact:
+        k3s_node_token: "{{ k3s_token_b64.content | b64decode | trim }}"
+
+    - name: Wait for k3s API to report node Ready
+      ansible.builtin.command: k3s kubectl get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      register: cp_ready
+      until: cp_ready.stdout == "True"
+      retries: 30
+      delay: 5
+      changed_when: false
+
+- name: Install k3s agents on all worker Pis
+  hosts: k3s_agent
+  become: true
+  tags: [k3s, k3s-agent, all]
+  tasks:
+    - name: Check if k3s already installed
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s
+      register: k3s_bin
+
+    - name: Run k3s agent install + join
+      ansible.builtin.shell: |
+        curl -sfL {{ k3s_install_url }} | \
+        K3S_URL=https://{{ cluster_endpoint }}:6443 \
+        K3S_TOKEN={{ hostvars[groups['k3s_server'][0]].k3s_node_token }} \
+        {% if k3s_version %}INSTALL_K3S_VERSION={{ k3s_version }} {% endif %}sh -
+      args:
+        executable: /bin/bash
+      when: not k3s_bin.stat.exists
+      register: k3s_join
+      changed_when: k3s_join.rc == 0
+
+- name: Fetch kubeconfig to your laptop
+  hosts: k3s_server
+  become: true
+  tags: [kubeconfig, all]
+  tasks:
+    - name: Copy /etc/rancher/k3s/k3s.yaml off the Pi
+      ansible.builtin.fetch:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: "{{ kubeconfig_local_path }}"
+        flat: true
+
+    - name: Rewrite server URL to reach the Pi from the laptop
+      delegate_to: localhost
+      become: false
+      ansible.builtin.replace:
+        path: "{{ kubeconfig_local_path }}"
+        regexp: 'server: https://127.0.0.1:6443'
+        replace: "server: https://{{ cluster_endpoint }}:6443"
+
+    - name: chmod 600 on kubeconfig
+      delegate_to: localhost
+      become: false
+      ansible.builtin.file:
+        path: "{{ kubeconfig_local_path }}"
+        mode: '0600'
+
+- name: Install Rancher Manager (ingress-nginx + cert-manager + Rancher)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [rancher]
+  vars:
+    cp_ip: "{{ hostvars[groups['k3s_server'][0]].ansible_default_ipv4.address }}"
+    # Rancher hostname: use the override if set, otherwise auto-pick nip.io of CP IP.
+    rancher_host: "{{ rancher_hostname if rancher_hostname else 'rancher.' ~ cp_ip ~ '.nip.io' }}"
+  tasks:
+    - name: Check helm is on PATH
+      ansible.builtin.command: helm version --short
+      changed_when: false
+      register: helm_check
+      failed_when: helm_check.rc != 0
+
+    - name: Add Helm repos
+      kubernetes.core.helm_repository:
+        name: "{{ item.name }}"
+        repo_url: "{{ item.url }}"
+      loop:
+        - { name: jetstack,       url: "https://charts.jetstack.io" }
+        - { name: ingress-nginx,  url: "https://kubernetes.github.io/ingress-nginx" }
+        - { name: rancher-stable, url: "https://releases.rancher.com/server-charts/stable" }
+
+    - name: Install ingress-nginx
+      kubernetes.core.helm:
+        name: ingress-nginx
+        chart_ref: ingress-nginx/ingress-nginx
+        release_namespace: ingress-nginx
+        create_namespace: true
+        kubeconfig: "{{ kubeconfig_local_path }}"
+        wait: true
+        timeout: 5m
+        values:
+          controller:
+            service:
+              type: LoadBalancer
+            publishService:
+              enabled: true
+
+    - name: Install cert-manager (with CRDs)
+      kubernetes.core.helm:
+        name: cert-manager
+        chart_ref: jetstack/cert-manager
+        release_namespace: cert-manager
+        create_namespace: true
+        kubeconfig: "{{ kubeconfig_local_path }}"
+        wait: true
+        timeout: 5m
+        values:
+          installCRDs: true
+
+    - name: Install Rancher
+      kubernetes.core.helm:
+        name: rancher
+        chart_ref: rancher-stable/rancher
+        chart_version: "{{ rancher_chart_version | default(omit, true) }}"
+        release_namespace: "{{ rancher_namespace }}"
+        create_namespace: true
+        kubeconfig: "{{ kubeconfig_local_path }}"
+        wait: true
+        timeout: 15m
+        values:
+          hostname: "{{ rancher_host }}"
+          bootstrapPassword: "{{ rancher_bootstrap_password }}"
+          replicas: 1
+          ingress:
+            ingressClassName: nginx
+
+    - name: Wait for Rancher rollout
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_local_path }}"
+        api_version: apps/v1
+        kind: Deployment
+        name: rancher
+        namespace: "{{ rancher_namespace }}"
+      register: rancher_deploy
+      until:
+        - rancher_deploy.resources | length > 0
+        - rancher_deploy.resources[0].status.readyReplicas | default(0) >= 1
+      retries: 90
+      delay: 10
+
+    - name: Print access info
+      ansible.builtin.debug:
+        msg:
+          - "Rancher ready at: https://{{ rancher_host }}"
+          - "Bootstrap password: {{ rancher_bootstrap_password }}"
+          - "Accept the self-signed cert, then set a real admin password on the welcome screen."
