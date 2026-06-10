@@ -1,0 +1,60 @@
+---
+# A long-running Ubuntu pod for poking at — feels VM-ish.
+# /root is backed by a PVC so files you create there survive pod restarts.
+# Binaries you `apt install` inside the pod do NOT survive — they live at /usr/bin
+# which is on the container's ephemeral layer. To make tooling persist, bake a
+# custom image or move to KubeVirt (see PROGRESS.md).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sandbox-home
+  namespace: sandbox
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox
+  namespace: sandbox
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # PVC is RWO, so we can't have two pods at once
+  selector:
+    matchLabels:
+      app: sandbox
+  template:
+    metadata:
+      labels:
+        app: sandbox
+    spec:
+      containers:
+        - name: sandbox
+          image: ubuntu:24.04
+          command: ["/bin/sleep", "infinity"]
+          tty: true
+          stdin: true
+          volumeMounts:
+            - name: home
+              mountPath: /root
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: sandbox-home

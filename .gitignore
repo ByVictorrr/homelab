@@ -3,3 +3,11 @@ __pycache__/
 .ansible/
 *.retry
 .idea/
+# Never commit vault passwords. The encrypted vault files themselves are
+# safe to commit; the password to decrypt them is not.
+.ansible-vault-pass
+*.vault-pass
+# Local plaintext secrets — never commit
+.env
+.env.*
+!.env.example

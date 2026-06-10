@@ -1,0 +1,86 @@
+---
+# Ollama — local LLM runner. Open WebUI auto-discovers models served here via
+# OLLAMA_BASE_URL (already wired in chat-webui.yaml).
+#
+# Reality check on Pi 5 8GB: usable for `llama3.2:3b` (~3-5 tok/s, OK for
+# quick questions), painful for anything 7B+. Treat this as the "private /
+# offline" fallback; family will mostly use cloud models via OpenRouter.
+#
+# After applying, pull a model into the pod:
+#   kubectl -n ollama exec -it deploy/ollama -- ollama pull llama3.2:3b
+#   kubectl -n ollama exec -it deploy/ollama -- ollama pull qwen2.5:3b
+# Models persist on the PVC across pod restarts.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ollama
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-models
+  namespace: ollama
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: ollama
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      # local-path PVs pin to whichever node the pod first lands on, so the
+      # first scheduling decision is sticky. Let the scheduler pick; if you'd
+      # rather force a specific node (e.g. a worker with the most free RAM),
+      # add `nodeName: rpi-node1` here before first apply.
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          ports:
+            - containerPort: 11434
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:11434"
+            - name: OLLAMA_KEEP_ALIVE
+              value: "5m"
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "4"      # let it eat all 4 cores during inference
+              memory: "6Gi" # leave headroom for k3s + other pods
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: ollama-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: ollama
+spec:
+  selector:
+    app: ollama
+  ports:
+    - port: 11434
+      targetPort: 11434

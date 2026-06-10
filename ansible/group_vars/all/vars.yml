@@ -22,3 +22,22 @@ rancher_namespace: cattle-system
 rancher_bootstrap_password: "rancher-init-change-me"   # override on the CLI: -e rancher_bootstrap_password=...
 rancher_hostname: ""          # empty = auto-compute as rancher.<rpi-control-ip>.nip.io
 rancher_chart_version: ""     # empty = latest stable
+
+# Family chat / LLM (see `llm` play in site.yml)
+# Open WebUI: API key for the OpenAI-compatible endpoint (OpenRouter, OpenAI,
+# Anthropic via proxy, etc.). Empty = playbook applies the manifests but skips
+# secret-seeding so you can do it by hand later. Override on CLI:
+#   -e llm_api_key='sk-or-v1-...'
+llm_api_key: ""
+
+# Ollama: list of model tags to `ollama pull` after the deployment is up.
+# Default empty so the playbook doesn't burn 5-10 min per model unprompted.
+# Override on CLI: -e '{"ollama_models":["llama3.2:3b"]}'
+ollama_models: []
+
+# Tailscale operator: OAuth client credentials from
+# https://login.tailscale.com/admin/settings/oauth (Devices+Auth Keys scopes,
+# tag:k8s ownership in your ACL). Empty = skip operator install (you can apply
+# the Tailscale Ingress later once the operator is up).
+tailscale_oauth_client_id: ""
+tailscale_oauth_client_secret: ""

@@ -17,13 +17,26 @@
   hosts: k3s_cluster
   become: true
   gather_facts: true
-  tags: [prep, k3s, all]
+  tags: [prep, k3s]
   tasks:
+    - name: Wait for cloud-init to finish (first-boot only)
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for apt/dpkg lock to be released
+      ansible.builtin.shell: |
+        while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+          sleep 5
+        done
+      changed_when: false
+
     - name: apt update + safe upgrade
       ansible.builtin.apt:
         update_cache: true
         upgrade: safe
         cache_valid_time: 3600
+        lock_timeout: 600
 
     - name: Install required packages
       ansible.builtin.apt:
@@ -35,6 +48,7 @@
           - avahi-daemon          # so .local hostnames resolve between Pis
           - libnss-mdns
         state: present
+        lock_timeout: 600
 
     - name: Manage /etc/hosts entries for every cluster node
       # Drops an Ansible-managed block on every Pi that maps rpi-control,
@@ -78,7 +92,7 @@
 - name: Install k3s server on rpi-control
   hosts: k3s_server
   become: true
-  tags: [k3s, k3s-server, all]
+  tags: [k3s, k3s-server]
   tasks:
     - name: Check if k3s binary already present
       ansible.builtin.stat:
@@ -120,7 +134,7 @@
 - name: Install k3s agents on all worker Pis
   hosts: k3s_agent
   become: true
-  tags: [k3s, k3s-agent, all]
+  tags: [k3s, k3s-agent]
   tasks:
     - name: Check if k3s already installed
       ansible.builtin.stat:
@@ -139,10 +153,44 @@
       register: k3s_join
       changed_when: k3s_join.rc == 0
 
+    # Idempotent reconcile: ensure the agent points at the current control plane
+    # and uses the current node token. Recovers from CP IP changes / token
+    # rotation / 401 Unauthorized without needing to reinstall k3s.
+    - name: Reconcile k3s-agent env (server URL + token)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/k3s-agent.service.env
+        owner: root
+        group: root
+        mode: '0600'
+        content: |
+          K3S_URL=https://{{ cluster_endpoint }}:6443
+          K3S_TOKEN={{ hostvars[groups['k3s_server'][0]].k3s_node_token }}
+      notify: restart k3s-agent
+
+  handlers:
+    # k3s-agent has a slow, multi-step shutdown — `systemctl restart` often
+    # exits non-zero ("did not take the steps required by its unit
+    # configuration") even though Restart=always brings the new instance up
+    # fine moments later. Tolerate the noisy exit, then poll is-active so
+    # we still fail loudly if the service really didn't come back.
+    - name: restart k3s-agent
+      ansible.builtin.shell: |
+        set +e
+        systemctl daemon-reload
+        systemctl restart k3s-agent
+        for i in $(seq 1 12); do
+          systemctl is-active --quiet k3s-agent && exit 0
+          sleep 5
+        done
+        echo "k3s-agent did not become active within 60s" >&2
+        systemctl status k3s-agent --no-pager -l >&2
+        exit 1
+      changed_when: true
+
 - name: Fetch kubeconfig to your laptop
   hosts: k3s_server
   become: true
-  tags: [kubeconfig, all]
+  tags: [kubeconfig]
   tasks:
     - name: Copy /etc/rancher/k3s/k3s.yaml off the Pi
       ansible.builtin.fetch:
@@ -235,23 +283,160 @@
           ingress:
             ingressClassName: nginx
 
+    # helm `wait: true` above already blocks on rollout, so this is mostly a
+    # sanity check. kubectl rollout status is more robust than k8s_info + until,
+    # which can trip on Jinja's strict-undefined when .resources isn't populated.
     - name: Wait for Rancher rollout
-      kubernetes.core.k8s_info:
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig_local_path }}
+        -n {{ rancher_namespace }} rollout status deploy/rancher
+        --timeout=15m
+      changed_when: false
+
+    # Optional: expose Rancher over Tailscale too. Safe to apply even before the
+    # Tailscale operator exists — the Ingress just sits Pending until the
+    # tailscale ingressClass shows up (installed by the `llm-tailscale` play).
+    - name: Apply Tailscale Ingress for Rancher
+      kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig_local_path }}"
-        api_version: apps/v1
-        kind: Deployment
-        name: rancher
-        namespace: "{{ rancher_namespace }}"
-      register: rancher_deploy
-      until:
-        - rancher_deploy.resources | length > 0
-        - rancher_deploy.resources[0].status.readyReplicas | default(0) >= 1
-      retries: 90
-      delay: 10
+        state: present
+        src: "{{ playbook_dir }}/../manifests/rancher-tailscale.yaml"
 
     - name: Print access info
       ansible.builtin.debug:
         msg:
-          - "Rancher ready at: https://{{ rancher_host }}"
+          - "Rancher LAN URL:     https://{{ rancher_host }}"
+          - "Rancher tailnet URL: https://rancher.<your-tailnet>.ts.net/  (check: kubectl -n cattle-system get ingress rancher-ts)"
           - "Bootstrap password: {{ rancher_bootstrap_password }}"
-          - "Accept the self-signed cert, then set a real admin password on the welcome screen."
+          - "Accept the self-signed cert (LAN URL only — tailnet URL has real Let's Encrypt TLS)."
+
+- name: Family chat (Open WebUI + Ollama + Tailscale)
+  # Usage:
+  #   ansible-playbook site.yml --tags llm-webui    -e llm_api_key='sk-or-v1-...'
+  #   ansible-playbook site.yml --tags llm-ollama   -e '{"ollama_models":["llama3.2:3b"]}'
+  #   ansible-playbook site.yml --tags llm-tailscale \
+  #     -e tailscale_oauth_client_id='tskey-client-...' \
+  #     -e tailscale_oauth_client_secret='tskey-...'
+  #   ansible-playbook site.yml --tags llm           # all three (each step skips if its var is empty)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [llm]
+  vars:
+    chat_namespace: chat
+    ollama_namespace: ollama
+    tailscale_namespace: tailscale
+    manifests_dir: "{{ playbook_dir }}/../manifests"
+  tasks:
+    # === Stage 1: Open WebUI ============================================
+    - name: Apply Open WebUI manifests
+      tags: [llm-webui]
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_local_path }}"
+        state: present
+        src: "{{ manifests_dir }}/chat-webui.yaml"
+
+    - name: Seed the LLM API key secret
+      tags: [llm-webui]
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_local_path }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: webui-llm-keys
+            namespace: "{{ chat_namespace }}"
+          type: Opaque
+          stringData:
+            openai-api-key: "{{ llm_api_key }}"
+      no_log: true
+      register: webui_secret
+      when: llm_api_key | length > 0
+
+    - name: Restart Open WebUI to pick up the new key
+      tags: [llm-webui]
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig_local_path }}
+        -n {{ chat_namespace }} rollout restart deploy/open-webui
+      changed_when: true
+      when: webui_secret is defined and webui_secret.changed | default(false)
+
+    - name: Wait for Open WebUI rollout
+      tags: [llm-webui]
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig_local_path }}
+        -n {{ chat_namespace }} rollout status deploy/open-webui
+        --timeout=10m
+      changed_when: false
+
+    # === Stage 2: Ollama (local model fallback) =========================
+    - name: Apply Ollama manifests
+      tags: [llm-ollama]
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_local_path }}"
+        state: present
+        src: "{{ manifests_dir }}/ollama.yaml"
+
+    - name: Wait for Ollama rollout
+      tags: [llm-ollama]
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig_local_path }}
+        -n {{ ollama_namespace }} rollout status deploy/ollama
+        --timeout=10m
+      changed_when: false
+
+    - name: Pull Ollama models (5-10 min per model on Pi)
+      tags: [llm-ollama]
+      # `ollama pull` is itself idempotent — re-runs are quick "already up to date".
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig_local_path }}
+        -n {{ ollama_namespace }} exec deploy/ollama --
+        ollama pull {{ item }}
+      loop: "{{ ollama_models }}"
+      changed_when: true
+
+    # === Stage 3: Tailscale operator + tailnet Ingress ==================
+    - name: Add Tailscale Helm repo
+      tags: [llm-tailscale]
+      kubernetes.core.helm_repository:
+        name: tailscale
+        repo_url: https://pkgs.tailscale.com/helmcharts
+      when: tailscale_oauth_client_id | length > 0
+
+    - name: Install Tailscale operator
+      tags: [llm-tailscale]
+      kubernetes.core.helm:
+        name: tailscale-operator
+        chart_ref: tailscale/tailscale-operator
+        release_namespace: "{{ tailscale_namespace }}"
+        create_namespace: true
+        kubeconfig: "{{ kubeconfig_local_path }}"
+        wait: true
+        timeout: 5m
+        values:
+          oauth:
+            clientId: "{{ tailscale_oauth_client_id }}"
+            clientSecret: "{{ tailscale_oauth_client_secret }}"
+          operatorConfig:
+            defaultTags:
+              - "tag:k8s"
+      no_log: true
+      when: tailscale_oauth_client_id | length > 0
+
+    - name: Apply Tailscale Ingress for Open WebUI
+      tags: [llm-tailscale]
+      # Safe to apply even if the operator isn't installed yet — the Ingress
+      # just sits in a Pending state until the tailscale ingressClass appears.
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_local_path }}"
+        state: present
+        src: "{{ manifests_dir }}/chat-webui-tailscale.yaml"
+
+    - name: Print access info
+      tags: [llm-webui, llm-tailscale]
+      ansible.builtin.debug:
+        msg:
+          - "LAN URL:      http://chat.192.168.4.92.nip.io/"
+          - "Tailnet URL:  https://chat.<your-tailnet>.ts.net/  (check: kubectl -n chat get ingress open-webui-ts)"
+          - "First account you create becomes admin. New signups land in 'pending' until you approve them."

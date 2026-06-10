@@ -1,0 +1,143 @@
+---
+# Open WebUI — ChatGPT-style frontend that talks to cloud LLMs (Claude, GPT, etc.)
+# via an OpenAI-compatible endpoint, and optionally to a local Ollama (see
+# `ollama.yaml`). SQLite + uploads live on a PVC at /app/backend/data.
+#
+# Cloud provider: defaults to OpenRouter, which exposes Claude/GPT/Llama/etc.
+# through one OpenAI-compatible API and one key. Swap OPENAI_API_BASE_URL +
+# the secret if you'd rather hit OpenAI or Anthropic directly.
+#
+# First-time setup:
+#   1. kubectl apply -f manifests/chat-webui.yaml
+#   2. Put the real key in the secret:
+#        kubectl -n chat create secret generic webui-llm-keys \
+#          --from-literal=openai-api-key='sk-or-...' \
+#          --dry-run=client -o yaml | kubectl apply -f -
+#   3. Restart so it picks up the key: kubectl -n chat rollout restart deploy/open-webui
+#   4. Browse to http://chat.192.168.4.92.nip.io  — the first account you create
+#      becomes admin. New signups land in "pending" until you approve them.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chat
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: webui-data
+  namespace: chat
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Placeholder so the Deployment can start; replace the value with `kubectl create
+# secret ... --dry-run -o yaml | kubectl apply -f -` (see header). Never commit
+# the real key.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: webui-llm-keys
+  namespace: chat
+type: Opaque
+stringData:
+  openai-api-key: "REPLACE_ME"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+  namespace: chat
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # PVC is RWO
+  selector:
+    matchLabels:
+      app: open-webui
+  template:
+    metadata:
+      labels:
+        app: open-webui
+    spec:
+      containers:
+        - name: open-webui
+          image: ghcr.io/open-webui/open-webui:main
+          ports:
+            - containerPort: 8080
+          env:
+            - name: OPENAI_API_BASE_URL
+              value: "https://openrouter.ai/api/v1"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: webui-llm-keys
+                  key: openai-api-key
+            # Talk to the in-cluster Ollama if it's deployed. Harmless if not —
+            # the model dropdown just shows no Ollama models.
+            - name: OLLAMA_BASE_URL
+              value: "http://ollama.ollama.svc.cluster.local:11434"
+            - name: WEBUI_AUTH
+              value: "True"
+            # New signups land in "pending" — admin (you) approves them in
+            # Settings → Admin → Users before they can chat. Family-safe default.
+            - name: DEFAULT_USER_ROLE
+              value: "pending"
+            - name: ENABLE_SIGNUP
+              value: "True"
+          volumeMounts:
+            - name: data
+              mountPath: /app/backend/data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: webui-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-webui
+  namespace: chat
+spec:
+  selector:
+    app: open-webui
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+# LAN ingress (HTTP, nip.io). For remote access, also apply
+# `chat-webui-tailscale.yaml` — that gives you https://chat.<tailnet>.ts.net
+# with automatic TLS, and you can reach it from any device running Tailscale.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: open-webui
+  namespace: chat
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: chat.192.168.4.92.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: open-webui
+                port:
+                  number: 80

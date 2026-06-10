@@ -1,0 +1,26 @@
+---
+# Expose Rancher over Tailscale at https://rancher.<tailnet>.ts.net
+#
+# Coexists with the LAN nginx ingress at rancher.192.168.4.92.nip.io —
+# both target the same Service. Pick whichever URL you prefer.
+#
+# Prereqs:
+#   - Tailscale operator installed (manifests/chat-webui-tailscale.yaml path)
+#   - HTTPS enabled on the tailnet (Admin → DNS → HTTPS Certificates)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rancher-ts
+  namespace: cattle-system
+  annotations:
+    tailscale.com/hostname: "rancher"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - rancher
+  defaultBackend:
+    service:
+      name: rancher
+      port:
+        number: 80

@@ -1,0 +1,31 @@
+---
+# Expose Open WebUI over Tailscale so family can use it from anywhere
+# (phone, traveling) over the private mesh, with automatic HTTPS.
+#
+# PREREQ: install the Tailscale Kubernetes operator once per cluster.
+# This file does NOT install the operator — see the install steps in
+# PROGRESS.md ("Family chat / LLM" section).
+#
+# After the operator is running, applying this file makes Open WebUI
+# reachable at https://chat.<your-tailnet>.ts.net for anyone in your
+# tailnet. The operator handles the Tailscale auth, the proxy pod,
+# the cert via Let's Encrypt, and MagicDNS registration.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: open-webui-ts
+  namespace: chat
+  annotations:
+    # Use the tailnet's MagicDNS name. Drop this annotation if you want the
+    # operator to auto-pick the hostname from the resource name.
+    tailscale.com/hostname: "chat"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - chat
+  defaultBackend:
+    service:
+      name: open-webui
+      port:
+        number: 80
