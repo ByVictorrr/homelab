@@ -437,6 +437,6 @@
       tags: [llm-webui, llm-tailscale]
       ansible.builtin.debug:
         msg:
-          - "LAN URL:      http://chat.192.168.4.92.nip.io/"
+          - "LAN URL:      http://chat.192.168.4.27.nip.io/"
           - "Tailnet URL:  https://chat.<your-tailnet>.ts.net/  (check: kubectl -n chat get ingress open-webui-ts)"
           - "First account you create becomes admin. New signups land in 'pending' until you approve them."

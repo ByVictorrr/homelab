@@ -1,7 +1,7 @@
 ---
 # Expose Rancher over Tailscale at https://rancher.<tailnet>.ts.net
 #
-# Coexists with the LAN nginx ingress at rancher.192.168.4.92.nip.io —
+# Coexists with the LAN nginx ingress at rancher.192.168.4.27.nip.io —
 # both target the same Service. Pick whichever URL you prefer.
 #
 # Prereqs:
