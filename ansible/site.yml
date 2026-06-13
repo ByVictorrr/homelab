@@ -58,7 +58,7 @@
         marker: "# {mark} ANSIBLE MANAGED rpi-cluster"
         block: |
           {% for host in groups['k3s_cluster'] %}
-          {{ hostvars[host].ansible_default_ipv4.address }} {{ host }} {{ host }}.local
+          {{ hostvars[host].ansible_host }} {{ host }} {{ host }}.local
           {% endfor %}
 
     - name: Enable iscsid (for future Longhorn)
@@ -306,7 +306,7 @@
       ansible.builtin.debug:
         msg:
           - "Rancher LAN URL:     https://{{ rancher_host }}"
-          - "Rancher tailnet URL: https://rancher.<your-tailnet>.ts.net/  (check: kubectl -n cattle-system get ingress rancher-ts)"
+          - "Rancher tailnet URL: https://rancher.bluebuck-micro.ts.net/  (check: kubectl -n cattle-system get ingress rancher-ts)"
           - "Bootstrap password: {{ rancher_bootstrap_password }}"
           - "Accept the self-signed cert (LAN URL only — tailnet URL has real Let's Encrypt TLS)."
 
@@ -438,5 +438,5 @@
       ansible.builtin.debug:
         msg:
           - "LAN URL:      http://chat.192.168.4.27.nip.io/"
-          - "Tailnet URL:  https://chat.<your-tailnet>.ts.net/  (check: kubectl -n chat get ingress open-webui-ts)"
+          - "Tailnet URL:  https://chat.bluebuck-micro.ts.net/  (check: kubectl -n chat get ingress open-webui-ts)"
           - "First account you create becomes admin. New signups land in 'pending' until you approve them."

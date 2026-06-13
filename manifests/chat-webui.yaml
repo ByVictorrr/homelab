@@ -121,7 +121,7 @@ spec:
       targetPort: 8080
 ---
 # LAN ingress (HTTP, nip.io). For remote access, also apply
-# `chat-webui-tailscale.yaml` — that gives you https://chat.<tailnet>.ts.net
+# `chat-webui-tailscale.yaml` — that gives you https://chat.bluebuck-micro.ts.net
 # with automatic TLS, and you can reach it from any device running Tailscale.
 apiVersion: networking.k8s.io/v1
 kind: Ingress

@@ -1,0 +1,116 @@
+---
+# Storage layout — formats each Pi's /dev/sda and assigns a role.
+#
+#   rpi-control → NFS server      /mnt/nfs           ~1 TB → nfs://192.168.4.27/mnt/nfs
+#   rpi-node1   → Nextcloud-only  /mnt/nextcloud     ~1 TB hostPath PVC
+#   rpi-node2   → Longhorn        /var/lib/longhorn  ~1 TB into the Longhorn pool
+#   rpi-node3   → Longhorn        /var/lib/longhorn  ~1 TB extends the Longhorn pool
+#   rpi-node4   → Longhorn        /var/lib/longhorn  ~500 GB extends the pool (when added)
+#
+# Idempotent: re-running it after success is safe (no reformat, no double-mount).
+# Will NOT reformat a drive that already has a filesystem on it.
+#
+# Run:
+#   cd ansible
+#   ansible-playbook playbooks/storage.yml --ask-become-pass
+#
+# After this finishes, return to me — I'll redirect Nextcloud's PVC and install
+# Longhorn + the NFS provisioner.
+
+- name: Per-Pi SSD format + mount
+  hosts: k3s_cluster
+  become: true
+  vars:
+    storage_role:
+      rpi-control: nfs
+      rpi-node1:   nextcloud
+      rpi-node2:   longhorn
+      rpi-node3:   longhorn
+      rpi-node4:   longhorn   # defaults — extends Longhorn pool to ~2TB when 5th Pi joins
+    mount_paths:
+      nfs:       /mnt/nfs
+      nextcloud: /mnt/nextcloud
+      longhorn:  /var/lib/longhorn
+  tasks:
+    - name: Discover this host's role
+      ansible.builtin.set_fact:
+        role: "{{ storage_role.get(inventory_hostname, 'longhorn') }}"
+        mount_path: "{{ mount_paths[storage_role.get(inventory_hostname, 'longhorn')] }}"
+
+    - name: Sanity check — /dev/sda must exist
+      ansible.builtin.stat:
+        path: /dev/sda
+      register: sda_dev
+      failed_when: not sda_dev.stat.exists
+
+    - name: Format /dev/sda as ext4 if no filesystem present (idempotent)
+      community.general.filesystem:
+        fstype: ext4
+        dev: /dev/sda
+        # force=no by default — refuses to clobber existing fs
+
+    - name: Read UUID of /dev/sda
+      ansible.builtin.command: blkid -s UUID -o value /dev/sda
+      register: sda_uuid
+      changed_when: false
+
+    - name: Create mount point {{ mount_path }}
+      ansible.builtin.file:
+        path: "{{ mount_path }}"
+        state: directory
+        mode: "0755"
+
+    - name: Mount /dev/sda at {{ mount_path }} (persistent via fstab)
+      ansible.posix.mount:
+        path: "{{ mount_path }}"
+        src: "UUID={{ sda_uuid.stdout }}"
+        fstype: ext4
+        opts: defaults,noatime,nofail
+        state: mounted
+
+    - name: Show mounted size
+      ansible.builtin.command: df -h {{ mount_path }}
+      register: df_out
+      changed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} ({{ role }}): {{ df_out.stdout_lines[-1] }}"
+
+- name: NFS server setup on rpi-control
+  hosts: rpi-control
+  become: true
+  tasks:
+    - name: Install nfs-kernel-server
+      ansible.builtin.apt:
+        name: nfs-kernel-server
+        state: present
+        update_cache: true
+        lock_timeout: 600
+
+    - name: Export /mnt/nfs to LAN + cluster pod network
+      ansible.builtin.lineinfile:
+        path: /etc/exports
+        # rw + sync, allow root, accessible from LAN (192.168.4.0/22) + k3s pod CIDR (10.42.0.0/16) + tailnet (100.64.0.0/10)
+        line: "/mnt/nfs 192.168.4.0/22(rw,sync,no_subtree_check,no_root_squash) 10.42.0.0/16(rw,sync,no_subtree_check,no_root_squash) 100.64.0.0/10(rw,sync,no_subtree_check,no_root_squash)"
+        create: true
+        mode: "0644"
+      register: exports_changed
+
+    - name: Apply exports (exportfs -ra)
+      ansible.builtin.command: exportfs -ra
+      when: exports_changed.changed
+
+    - name: Ensure nfs-kernel-server is up and enabled
+      ansible.builtin.systemd:
+        name: nfs-kernel-server
+        state: started
+        enabled: true
+
+    - name: Show exports
+      ansible.builtin.command: exportfs -v
+      register: exports_out
+      changed_when: false
+
+    - ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} NFS exports: {{ exports_out.stdout_lines }}"

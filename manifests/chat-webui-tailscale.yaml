@@ -7,7 +7,7 @@
 # PROGRESS.md ("Family chat / LLM" section).
 #
 # After the operator is running, applying this file makes Open WebUI
-# reachable at https://chat.<your-tailnet>.ts.net for anyone in your
+# reachable at https://chat.bluebuck-micro.ts.net for anyone in your
 # tailnet. The operator handles the Tailscale auth, the proxy pod,
 # the cert via Let's Encrypt, and MagicDNS registration.
 apiVersion: networking.k8s.io/v1

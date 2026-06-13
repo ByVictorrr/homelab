@@ -1,0 +1,54 @@
+---
+# Tell k3s containerd that 192.168.4.27:5000 is the cluster-local
+# Docker registry (HTTP, no TLS). After this, `image: 192.168.4.27:5000/foo:tag`
+# in any Deployment just works.
+#
+# This file lives at /etc/rancher/k3s/registries.yaml on each Pi. Editing it
+# requires a k3s/k3s-agent restart, which the playbook handles.
+#
+# Run:
+#   cd ansible
+#   ansible-playbook playbooks/registries.yml --ask-become-pass
+#
+# Idempotent — re-running just no-ops if the file already matches.
+
+- name: Configure k3s containerd to use the cluster-local registry
+  hosts: k3s_cluster
+  become: true
+  tasks:
+    - name: Ensure /etc/rancher/k3s exists
+      ansible.builtin.file:
+        path: /etc/rancher/k3s
+        state: directory
+        mode: "0755"
+
+    - name: Write /etc/rancher/k3s/registries.yaml
+      ansible.builtin.copy:
+        dest: /etc/rancher/k3s/registries.yaml
+        mode: "0644"
+        content: |
+          mirrors:
+            "192.168.4.27:5000":
+              endpoint:
+                - "http://192.168.4.27:5000"
+          configs:
+            "192.168.4.27:5000":
+              tls:
+                insecure_skip_verify: true
+      register: registries_changed
+
+    - name: Restart k3s server (control plane only)
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+      when:
+        - registries_changed.changed
+        - inventory_hostname in groups['k3s_server']
+
+    - name: Restart k3s-agent (workers only)
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: restarted
+      when:
+        - registries_changed.changed
+        - inventory_hostname in groups['k3s_agent']

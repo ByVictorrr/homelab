@@ -1,5 +1,5 @@
 ---
-# Expose Rancher over Tailscale at https://rancher.<tailnet>.ts.net
+# Expose Rancher over Tailscale at https://rancher.bluebuck-micro.ts.net
 #
 # Coexists with the LAN nginx ingress at rancher.192.168.4.27.nip.io —
 # both target the same Service. Pick whichever URL you prefer.

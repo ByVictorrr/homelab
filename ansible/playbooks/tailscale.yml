@@ -1,0 +1,82 @@
+---
+# Install Tailscale on every Pi as a host service. After this, each Pi shows
+# up in your tailnet at 100.x.x.x with MagicDNS (rpi-control.bluebuck-micro.ts.net),
+# you can SSH from anywhere, and containerd can pull from registry.bluebuck-micro.ts.net
+# without any insecure-registry config.
+#
+# PREREQ: create a reusable auth key:
+#   https://login.tailscale.com/admin/settings/keys → Generate auth key
+#     - Reusable: ON  (so all 4 Pis can use the same key)
+#     - Ephemeral: OFF
+#     - Pre-approved: ON  (skip device approval step)
+#     - Tag: tag:k8s    (matches the operator's tag, ACL-friendly)
+#
+# Run:
+#   cd ansible
+#   ansible-playbook playbooks/tailscale.yml --ask-become-pass \
+#     -e tailscale_authkey=tskey-auth-...
+#
+# Idempotent: re-running re-applies the same `tailscale up` flags but won't
+# re-install if Tailscale is already present.
+
+- name: Install + join Tailscale on every Pi host
+  hosts: k3s_cluster
+  become: true
+  vars:
+    tailscale_authkey: "{{ tailscale_authkey | mandatory }}"
+  tasks:
+    - name: Add Tailscale apt key
+      ansible.builtin.get_url:
+        url: https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg
+        dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
+        mode: "0644"
+
+    - name: Add Tailscale apt repo
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/tailscale.list
+        mode: "0644"
+        content: |
+          deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu noble main
+      register: tailscale_repo
+
+    - name: Install tailscale
+      ansible.builtin.apt:
+        name: tailscale
+        state: present
+        update_cache: "{{ tailscale_repo.changed }}"
+        lock_timeout: 600
+
+    - name: Enable + start tailscaled
+      ansible.builtin.systemd:
+        name: tailscaled
+        state: started
+        enabled: true
+
+    - name: Check current Tailscale status
+      ansible.builtin.command: tailscale status --json
+      register: ts_status
+      changed_when: false
+      failed_when: false
+
+    - name: Run `tailscale up` with the auth key (joins tailnet)
+      ansible.builtin.command:
+        cmd: >
+          tailscale up
+          --authkey={{ tailscale_authkey }}
+          --hostname={{ inventory_hostname }}
+          --accept-routes
+          --accept-dns=true
+          --advertise-tags=tag:k8s
+          --reset
+      when: >
+        (ts_status.stdout | from_json).BackendState != "Running" or
+        (ts_status.stdout | from_json).Self.HostName != inventory_hostname
+
+    - name: Show tailnet IP
+      ansible.builtin.command: tailscale ip -4
+      register: ts_ip
+      changed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} tailnet IP: {{ ts_ip.stdout }}  (DNS: {{ inventory_hostname }}.bluebuck-micro.ts.net)"
