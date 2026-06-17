@@ -1,0 +1,72 @@
+---
+# Immich — self-hosted Google Photos replacement. Auto phone backup, AI face
+# / object search, shared albums.
+#
+# Immich is multi-container (server + microservices + ML + postgres-with-pgvector
+# + redis) and ships breaking changes often, so a from-scratch manifest in this
+# repo would rot. Recommended path is the official Helm chart, which the project
+# maintains alongside the app code.
+#
+# This file is split: namespace + DB password stub are committed here, and the
+# install command lives in the header below. Run it once; upgrades are
+# `helm upgrade ... --reuse-values`.
+#
+# First-time setup:
+#   1. Set a DB password (or just kubectl apply this file, then run the create
+#      secret command below — both work, same result):
+#        kubectl apply -f manifests/immich.yaml
+#        kubectl -n immich create secret generic immich-postgres \
+#          --from-literal=password="$(openssl rand -base64 24)" \
+#          --dry-run=client -o yaml | kubectl apply -f -
+#
+#   2. Install Immich via the official chart:
+#        helm repo add immich https://immich-app.github.io/immich-charts
+#        helm repo update
+#
+#        helm install immich immich/immich \
+#          --namespace immich \
+#          --set image.tag=release \
+#          --set immich.persistence.library.size=50Gi \
+#          --set postgresql.enabled=true \
+#          --set postgresql.global.postgresql.auth.existingSecret=immich-postgres \
+#          --set postgresql.global.postgresql.auth.secretKeys.adminPasswordKey=password \
+#          --set postgresql.global.postgresql.auth.secretKeys.userPasswordKey=password \
+#          --set redis.enabled=true \
+#          --set server.ingress.main.enabled=true \
+#          --set server.ingress.main.hosts[0].host=photos.192.168.4.27.nip.io \
+#          --set 'server.ingress.main.hosts[0].paths[0].path=/' \
+#          --set server.ingress.main.className=nginx
+#
+#   3. Wait for pods (image pulls are big, can take 10+ min on Pi over Wi-Fi):
+#        kubectl -n immich get pods -w
+#
+#   4. Browse to http://photos.192.168.4.27.nip.io
+#      - Create the admin account.
+#      - On phones: install the "Immich" app, point it at the URL, enable backup.
+#
+# Resource reality on Pi 5 8GB:
+#   - Server + microservices: ~500MB
+#   - postgres-with-pgvector: ~300MB
+#   - redis: ~50MB
+#   - immich-machine-learning: ~1.5GB resident when ML models load
+#   Total ~2.5GB. Fine. ML jobs (face detection on first import) are CPU-heavy
+#   and slow on arm; let them run overnight after a big phone backup.
+#
+# Useful settings post-install:
+#   - Admin → Settings → Machine Learning: pick smaller models if perf is bad.
+#   - Admin → Settings → External Library: point at a path on your media drive
+#     if you want Immich to index existing photos without re-uploading.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: immich
+---
+# Replace `password` with: kubectl create secret ... --dry-run -o yaml | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: immich-postgres
+  namespace: immich
+type: Opaque
+stringData:
+  password: "REPLACE_ME"

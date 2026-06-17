@@ -1,0 +1,22 @@
+---
+# Expose Nextcloud over Tailscale at https://cloud.bluebuck-micro.ts.net.
+# All Apple / Android Nextcloud apps + DAVx5 (Android CalDAV/CardDAV) work
+# best with this URL since they want HTTPS by default.
+# Prereq: Tailscale operator installed (see PROGRESS.md).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nextcloud-ts
+  namespace: nextcloud
+  annotations:
+    tailscale.com/hostname: "cloud"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - cloud
+  defaultBackend:
+    service:
+      name: nextcloud
+      port:
+        number: 80

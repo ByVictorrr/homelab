@@ -1,0 +1,149 @@
+---
+# AdGuard Home — LAN-wide DNS resolver + ad/tracker blocker. Once configured,
+# point eero's custom DNS at this Service's LoadBalancer IP and every device
+# on your network gets ad blocking + custom local DNS records (so you can
+# replace nip.io URLs with real names like `chat.home.lan`).
+#
+# First-time setup:
+#   1. kubectl apply -f manifests/adguard.yaml
+#   2. kubectl -n adguard get svc adguard-dns   # note the EXTERNAL-IP (LB IP)
+#   3. Browse to http://adguard.192.168.4.27.nip.io
+#      - On first load you'll see the install wizard. Set admin user/pass.
+#      - For "Admin Web Interface" pick port 3000 (it'll bind in-pod; we
+#        proxy 80 → 3000 via the Service).
+#      - For "DNS server" pick port 53 (matches the Service).
+#   4. eero app → Settings → Network Settings → DNS → Custom → Primary =
+#      the AdGuard LoadBalancer IP from step 2. Save.
+#   5. (Recommended) In AdGuard → Filters → DNS blocklists, enable a couple
+#      lists (AdGuard DNS filter, OISD, etc.).
+#   6. (Optional) AdGuard → Filters → DNS rewrites → add A records for your
+#      services (chat.home.lan, rancher.home.lan, etc.) → update Ingress
+#      hosts to match.
+#
+# Note: port 53 is privileged. k3s + klipper-lb handle this fine. If you
+# already run a DNS server on your LAN, change spec.ports[].port to something
+# unused (e.g. 5353) and forward eero → that port.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: adguard
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: adguard-conf
+  namespace: adguard
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: adguard-work
+  namespace: adguard
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adguard
+  namespace: adguard
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: adguard
+  template:
+    metadata:
+      labels:
+        app: adguard
+    spec:
+      containers:
+        - name: adguard
+          image: adguard/adguardhome:latest
+          ports:
+            - { name: dns-udp,  containerPort: 53,   protocol: UDP }
+            - { name: dns-tcp,  containerPort: 53,   protocol: TCP }
+            - { name: setup,    containerPort: 3000, protocol: TCP }
+            - { name: web,      containerPort: 80,   protocol: TCP }
+          volumeMounts:
+            - { name: conf, mountPath: /opt/adguardhome/conf }
+            - { name: work, mountPath: /opt/adguardhome/work }
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+      volumes:
+        - { name: conf, persistentVolumeClaim: { claimName: adguard-conf } }
+        - { name: work, persistentVolumeClaim: { claimName: adguard-work } }
+---
+# DNS — exposed as LoadBalancer so eero can point at it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: adguard-dns
+  namespace: adguard
+spec:
+  type: LoadBalancer
+  selector:
+    app: adguard
+  ports:
+    - { name: dns-udp, port: 53, targetPort: 53, protocol: UDP }
+    - { name: dns-tcp, port: 53, targetPort: 53, protocol: TCP }
+---
+# Admin UI — through ingress-nginx.
+apiVersion: v1
+kind: Service
+metadata:
+  name: adguard-web
+  namespace: adguard
+spec:
+  selector:
+    app: adguard
+  ports:
+    - name: web
+      port: 80
+      targetPort: 80
+    - name: setup
+      port: 3000
+      targetPort: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: adguard
+  namespace: adguard
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+    nginx.ingress.kubernetes.io/auth-url: "http://authelia.auth.svc.cluster.local/api/verify"
+    nginx.ingress.kubernetes.io/auth-signin: "https://auth.192.168.4.27.nip.io"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [adguard.192.168.4.27.nip.io]
+      secretName: adguard-tls
+  rules:
+    - host: adguard.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: adguard-web
+                port:
+                  number: 80

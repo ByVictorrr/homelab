@@ -1,0 +1,287 @@
+---
+# Nextcloud — Dropbox + iCloud + Google Photos + CalDAV + CardDAV in one app.
+# Three components: nextcloud (app), postgres (DB), redis (cache).
+#
+# First-time setup:
+#   1. kubectl apply -f manifests/nextcloud.yaml
+#   2. Wait for all 3 pods Running (postgres first, then nextcloud after it can connect).
+#        kubectl -n nextcloud get pods -w
+#      Initial bootstrap takes 2-5 min — Nextcloud runs `occ maintenance:install`.
+#   3. Browse to http://cloud.192.168.4.27.nip.io (LAN) or
+#      https://cloud.bluebuck-micro.ts.net (anywhere via Tailscale)
+#   4. Log in:
+#        admin / <generated password — see below>
+#      The password is randomly generated and stored in the Secret. Get it with:
+#        kubectl -n nextcloud get secret nextcloud-admin -o jsonpath='{.data.password}' | base64 -d
+#      Change it immediately in Settings → Personal → Security.
+#
+# Apple / Android clients:
+#   - Files + photo backup: "Nextcloud" app from App Store / Play Store.
+#       Server URL: use the Tailscale URL (works anywhere).
+#   - Calendar (iOS): Settings → Calendar → Accounts → Add CalDAV Account.
+#       Server: cloud.bluebuck-micro.ts.net  |  user/pass: same as Nextcloud.
+#   - Contacts (iOS): Settings → Contacts → Accounts → Add CardDAV Account.
+#       Same server + creds.
+#   - Calendar/Contacts (Android): install DAVx5 from Play Store → add account with
+#       the Tailscale URL + your Nextcloud creds. DAVx5 handles both calendar + contacts.
+#
+# Resource note: Nextcloud + Postgres + Redis ~ 1.5-2 GB RAM total. Don't run on
+# a node that's already hosting Rancher.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nextcloud
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nextcloud-db
+  namespace: nextcloud
+type: Opaque
+stringData:
+  POSTGRES_USER: "nextcloud"
+  POSTGRES_PASSWORD: "REPLACE_ME_DB_PASSWORD"
+  POSTGRES_DB: "nextcloud"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nextcloud-admin
+  namespace: nextcloud
+type: Opaque
+stringData:
+  username: "admin"
+  password: "REPLACE_ME_ADMIN_PASSWORD"
+---
+# ----- POSTGRES -----
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nextcloud-postgres
+  namespace: nextcloud
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: nextcloud
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: nextcloud-db
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "nextcloud", "-d", "nextcloud"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: nextcloud-postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: nextcloud
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+# ----- REDIS -----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: nextcloud
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "32Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: nextcloud
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+# ----- NEXTCLOUD -----
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nextcloud-data
+  namespace: nextcloud
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nextcloud
+  namespace: nextcloud
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nextcloud
+  template:
+    metadata:
+      labels:
+        app: nextcloud
+    spec:
+      containers:
+        - name: nextcloud
+          image: nextcloud:30-apache
+          ports:
+            - containerPort: 80
+          env:
+            - name: POSTGRES_HOST
+              value: "postgres"
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: nextcloud-db, key: POSTGRES_USER } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: nextcloud-db, key: POSTGRES_PASSWORD } }
+            - name: POSTGRES_DB
+              valueFrom: { secretKeyRef: { name: nextcloud-db, key: POSTGRES_DB } }
+            - name: REDIS_HOST
+              value: "redis"
+            - name: NEXTCLOUD_ADMIN_USER
+              valueFrom: { secretKeyRef: { name: nextcloud-admin, key: username } }
+            - name: NEXTCLOUD_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: nextcloud-admin, key: password } }
+            - name: NEXTCLOUD_TRUSTED_DOMAINS
+              value: "cloud.192.168.4.27.nip.io cloud.bluebuck-micro.ts.net"
+            - name: TRUSTED_PROXIES
+              value: "10.42.0.0/16"     # k3s pod CIDR (ingress-nginx talks to NC from this range)
+            - name: APACHE_DISABLE_REWRITE_IP
+              value: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /var/www/html
+          readinessProbe:
+            httpGet:
+              path: /status.php
+              port: 80
+              httpHeaders:
+                - { name: Host, value: cloud.192.168.4.27.nip.io }
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 30      # initial install takes a while on Pi
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: nextcloud-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nextcloud
+  namespace: nextcloud
+spec:
+  selector:
+    app: nextcloud
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nextcloud
+  namespace: nextcloud
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10g"           # uploads
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    cert-manager.io/cluster-issuer: cluster-ca
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [cloud.192.168.4.27.nip.io]
+      secretName: nextcloud-tls
+  rules:
+    - host: cloud.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nextcloud
+                port:
+                  number: 80

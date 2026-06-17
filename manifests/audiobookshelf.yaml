@@ -1,0 +1,134 @@
+---
+# Audiobookshelf — self-hosted audiobook + podcast server. Multi-user, picks up
+# where you left off across devices. Excellent iOS + Android apps.
+#
+# First-time setup:
+#   1. kubectl apply -f manifests/audiobookshelf.yaml
+#   2. Browse to http://audiobooks.192.168.4.27.nip.io
+#      First account you create becomes root admin.
+#   3. Library setup: in the UI → "+ Add library"
+#      Mount audiobook/podcast files into /audiobooks and /podcasts on the pod
+#      (currently using a local-path PVC — once the storage playbook + NFS PVs
+#      are in place, switch this to NFS-backed PVCs so all 4 Pis can share data
+#      and you don't burn SD-card space).
+#   4. Mobile apps: "Audiobookshelf" in App Store / Play Store. Server URL =
+#      Tailscale URL. Add account, browse, download for offline listening.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: audiobookshelf
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: audiobookshelf-config
+  namespace: audiobookshelf
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: audiobookshelf-metadata
+  namespace: audiobookshelf
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: audiobookshelf-media
+  namespace: audiobookshelf
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: nfs-1
+  volumeName: nfs-audiobooks      # rpi-control:/mnt/nfs/audiobooks (see manifests/nfs-storage.yaml)
+  resources:
+    requests:
+      storage: 900Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audiobookshelf
+  namespace: audiobookshelf
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: audiobookshelf
+  template:
+    metadata:
+      labels:
+        app: audiobookshelf
+    spec:
+      containers:
+        - name: audiobookshelf
+          image: ghcr.io/advplyr/audiobookshelf:latest
+          ports:
+            - containerPort: 80
+          env:
+            - name: TZ
+              value: "America/Los_Angeles"
+          volumeMounts:
+            - { name: config,   mountPath: /config }
+            - { name: metadata, mountPath: /metadata }
+            - { name: media,    mountPath: /audiobooks }
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+      volumes:
+        - { name: config,   persistentVolumeClaim: { claimName: audiobookshelf-config } }
+        - { name: metadata, persistentVolumeClaim: { claimName: audiobookshelf-metadata } }
+        - { name: media,    persistentVolumeClaim: { claimName: audiobookshelf-media } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audiobookshelf
+  namespace: audiobookshelf
+spec:
+  selector:
+    app: audiobookshelf
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: audiobookshelf
+  namespace: audiobookshelf
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "5g"   # large audiobook uploads
+    cert-manager.io/cluster-issuer: cluster-ca
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [audiobooks.192.168.4.27.nip.io]
+      secretName: audiobookshelf-tls
+  rules:
+    - host: audiobooks.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: audiobookshelf
+                port:
+                  number: 80

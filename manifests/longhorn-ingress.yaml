@@ -1,0 +1,49 @@
+---
+# Longhorn UI — volumes, replicas, snapshots, backups, node health.
+# Exposes the chart's longhorn-frontend Service on the LAN and Tailscale.
+#
+# The LAN ingress is gated by Authelia (forward-auth). The Tailscale ingress
+# relies on tailnet membership as its auth layer.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: longhorn
+  namespace: longhorn-system
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+    nginx.ingress.kubernetes.io/auth-url: "http://authelia.auth.svc.cluster.local/api/verify"
+    nginx.ingress.kubernetes.io/auth-signin: "https://auth.192.168.4.27.nip.io"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [longhorn.192.168.4.27.nip.io]
+      secretName: longhorn-tls
+  rules:
+    - host: longhorn.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: longhorn-frontend
+                port:
+                  number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: longhorn-ts
+  namespace: longhorn-system
+  annotations:
+    tailscale.com/hostname: "longhorn"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - longhorn
+  defaultBackend:
+    service:
+      name: longhorn-frontend
+      port:
+        number: 80

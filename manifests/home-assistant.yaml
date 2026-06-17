@@ -1,0 +1,125 @@
+---
+# Home Assistant — smart-home hub. Controls lights, thermostats, sensors,
+# automations, voice assistants, etc.
+#
+# First-time setup:
+#   1. kubectl apply -f manifests/home-assistant.yaml
+#   2. Wait ~2 min for Running 1/1 (the first boot is slow — DB init).
+#   3. Browse to http://homeassistant.192.168.4.27.nip.io
+#      - Create owner account → answer the onboarding questions.
+#   4. (Optional) Discovery integrations: most network discovery (mDNS / SSDP)
+#      DOES NOT work from a pod without hostNetwork. Workarounds:
+#        - Add integrations manually by IP (most Home Assistant integrations support this).
+#        - Or, if you need discovery, change `spec.template.spec.hostNetwork: true`
+#          AND `nodeName: rpi-control` below. Then access HA on http://<control-ip>:8123
+#          directly (Ingress also still works).
+#   5. (Optional) USB devices (Zigbee/Z-Wave sticks) — k8s pods don't see USB by
+#      default. Either:
+#        - Run a Zigbee2MQTT / zwave-js-ui pod with hostPath device mount + nodeAffinity to the
+#          Pi the stick is plugged into, then connect HA to it over MQTT/WS.
+#        - Or just use Wi-Fi / Matter devices and skip USB entirely.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: home-assistant
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: home-assistant-config
+  namespace: home-assistant
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-assistant
+  namespace: home-assistant
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: home-assistant
+  template:
+    metadata:
+      labels:
+        app: home-assistant
+    spec:
+      # hostNetwork: true        # uncomment + set nodeName to enable LAN discovery
+      # nodeName: rpi-control
+      containers:
+        - name: home-assistant
+          image: ghcr.io/home-assistant/home-assistant:stable
+          ports:
+            - containerPort: 8123
+          env:
+            - name: TZ
+              value: "America/Los_Angeles"     # change to your zone
+          volumeMounts:
+            - name: config
+              mountPath: /config
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8123
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 20
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: home-assistant-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-assistant
+  namespace: home-assistant
+spec:
+  selector:
+    app: home-assistant
+  ports:
+    - port: 80
+      targetPort: 8123
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: home-assistant
+  namespace: home-assistant
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # HA uses WebSockets for the live UI; ingress-nginx upgrades automatically
+    # when the client sends Upgrade: websocket. Long timeouts above keep them open.
+    cert-manager.io/cluster-issuer: cluster-ca
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [homeassistant.192.168.4.27.nip.io]
+      secretName: home-assistant-tls
+  rules:
+    - host: homeassistant.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: home-assistant
+                port:
+                  number: 80

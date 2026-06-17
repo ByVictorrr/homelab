@@ -1,0 +1,297 @@
+---
+# trialday-builder — rebuilds the cluster trialday pod from the tip of
+# `auto/main` at end of each workday, using whatever Claude pushed.
+#
+# Pipeline (one Pod, three sequential containers):
+#   1. clone-and-test  → git clone, npm ci, npm test (vitest). Hard-fails on red.
+#   2. build-and-push  → kaniko builds arm64 image natively on a Pi, tags with
+#                        the commit SHA, pushes to the in-cluster registry.
+#   3. rollout         → kubectl sets the new image tag on deploy/trialday and
+#                        waits for the rollout to complete.
+#
+# Schedule: 22:00 UTC Mon-Fri (6pm America/New_York) — 1h after the evening
+# claude-worker session starts, giving it room to finish before we build.
+#
+# Source of build args (NEXT_PUBLIC_*): the existing `trialday-env` secret in
+# the trialday namespace. Same source the manual build on the laptop uses.
+#
+# ============================================================================
+# ONE-TIME SETUP
+# ============================================================================
+#
+# Prereqs (must be done before the first build can succeed):
+#
+#   1. Commit a Dockerfile + .dockerignore to `main` of the trialday repo.
+#      The auto/main branch inherits from main, so without these committed,
+#      kaniko has nothing to build from.
+#         cd ~/git/worksim   # or ~/git/trialday after rename
+#         git checkout main && git pull
+#         git add Dockerfile .dockerignore
+#         git commit -m 'build: add Dockerfile for in-cluster builds'
+#         git push origin main
+#
+#   2. Mirror the claude-worker SSH deploy key into the trialday namespace
+#      so the builder can clone the same private repo:
+#         kubectl get secret git-ssh -n claude-worker -o yaml \
+#           | sed 's/namespace: claude-worker/namespace: trialday/' \
+#           | kubectl apply -f -
+#
+#   3. Apply this manifest:
+#         kubectl apply -f manifests/trialday-builder.yaml
+#
+# Then trigger a test run instead of waiting until 6pm:
+#   kubectl -n trialday create job --from=cronjob/trialday-builder manual-$(date +%s)
+#   kubectl -n trialday logs -l app=trialday-builder -f --all-containers
+#
+# Pause:   kubectl -n trialday patch cronjob trialday-builder -p '{"spec":{"suspend":true}}'
+# Resume:  kubectl -n trialday patch cronjob trialday-builder -p '{"spec":{"suspend":false}}'
+#
+# Skips deploy automatically when:
+#   - auto/main branch doesn't exist yet
+#   - npm test fails
+#   - image SHA hasn't changed since the last successful build
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trialday-builder
+  namespace: trialday
+---
+# Minimum RBAC — only what's needed to update the trialday deployment in this
+# namespace. No cross-namespace, no cluster-wide rights.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trialday-builder
+  namespace: trialday
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/status"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trialday-builder
+  namespace: trialday
+subjects:
+  - kind: ServiceAccount
+    name: trialday-builder
+    namespace: trialday
+roleRef:
+  kind: Role
+  name: trialday-builder
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trialday-builder-config
+  namespace: trialday
+data:
+  GIT_REPO_URL:       "git@github.com:ByVictorrr/trialday.git"
+  GIT_BRANCH:         "auto/main"
+  REGISTRY:           "192.168.4.27:5000"
+  IMAGE_NAME:         "trialday"
+  TARGET_NAMESPACE:   "trialday"
+  TARGET_DEPLOYMENT: "trialday"
+  PUBLIC_APP_URL:     "https://trialday.bluebuck-micro.ts.net"
+
+  clone-and-test.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "==> [$(date -u +%H:%M:%SZ)] clone + test"
+
+    apt-get update -qq
+    apt-get install -y -qq --no-install-recommends git openssh-client ca-certificates curl
+
+    mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    install -m 600 /secrets/git-ssh/id_ed25519 ~/.ssh/id_ed25519
+    ssh-keyscan -t rsa,ecdsa,ed25519 github.com > ~/.ssh/known_hosts 2>/dev/null
+
+    cd /workspace
+    if [ -z "$(ls -A . 2>/dev/null)" ]; then
+      git clone --depth 30 --branch "${GIT_BRANCH}" "${GIT_REPO_URL}" repo \
+        || { echo "==> branch ${GIT_BRANCH} doesn't exist yet — nothing to build"; touch /workspace/SKIP_BUILD; exit 0; }
+    fi
+    cd repo
+    SHA="$(git rev-parse HEAD)"
+    echo "$SHA" > /workspace/SHA
+    echo "==> head=$SHA"
+
+    # Skip if the cluster is already running this SHA.
+    apt-get install -y -qq --no-install-recommends jq
+    curl -sSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/arm64/kubectl"
+    chmod +x /usr/local/bin/kubectl
+    CURRENT_IMAGE=$(kubectl -n "${TARGET_NAMESPACE}" get deploy/"${TARGET_DEPLOYMENT}" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
+    CURRENT_TAG="${CURRENT_IMAGE##*:}"
+    if [ "${CURRENT_TAG}" = "sha-${SHA:0:12}" ]; then
+      echo "==> deployment already on sha-${SHA:0:12} — nothing new to build"
+      touch /workspace/SKIP_BUILD
+      exit 0
+    fi
+
+    echo "==> npm ci"
+    npm ci --no-audit --no-fund --prefer-offline
+
+    echo "==> npm test (vitest)"
+    if ! npm test; then
+      echo "==> tests FAILED — skipping build, trialday pod stays on ${CURRENT_TAG}"
+      touch /workspace/SKIP_BUILD
+      exit 1
+    fi
+    echo "==> tests green, building sha-${SHA:0:12}"
+
+  build-and-push.sh: |
+    #!/busybox/sh
+    # Runs inside gcr.io/kaniko-project/executor:debug (busybox shell, no bash).
+    set -e
+    [ -f /workspace/SKIP_BUILD ] && { echo "==> SKIP_BUILD set, exiting"; exit 0; }
+
+    SHA=$(cat /workspace/SHA)
+    SHORT_SHA=$(echo "$SHA" | cut -c1-12)
+    DEST="${REGISTRY}/${IMAGE_NAME}:sha-${SHORT_SHA}"
+    DEST_LATEST="${REGISTRY}/${IMAGE_NAME}:auto-latest"
+
+    echo "==> building $DEST (and tagging :auto-latest)"
+
+    # Build NEXT_PUBLIC_* build-args from env. The trialday-env secret is
+    # mounted as envFrom on this container so every NEXT_PUBLIC_* is in scope.
+    BUILD_ARGS=""
+    BUILD_ARGS="$BUILD_ARGS --build-arg=NEXT_PUBLIC_APP_URL=${PUBLIC_APP_URL}"
+    for var in $(env | grep '^NEXT_PUBLIC_' | cut -d= -f1); do
+      [ "$var" = "NEXT_PUBLIC_APP_URL" ] && continue
+      eval "val=\$$var"
+      BUILD_ARGS="$BUILD_ARGS --build-arg=${var}=${val}"
+    done
+
+    /kaniko/executor \
+      --context=/workspace/repo \
+      --dockerfile=/workspace/repo/Dockerfile \
+      --destination="$DEST" \
+      --destination="$DEST_LATEST" \
+      --insecure \
+      --skip-tls-verify \
+      --cache=true \
+      --cache-repo="${REGISTRY}/${IMAGE_NAME}-cache" \
+      $BUILD_ARGS
+
+    echo "$DEST" > /workspace/IMAGE
+    echo "==> pushed $DEST"
+
+  rollout.sh: |
+    #!/usr/bin/env sh
+    set -e
+    [ -f /workspace/SKIP_BUILD ] && { echo "==> SKIP_BUILD set, no rollout"; exit 0; }
+    IMAGE=$(cat /workspace/IMAGE)
+    echo "==> setting deploy/${TARGET_DEPLOYMENT} image to $IMAGE"
+    kubectl -n "${TARGET_NAMESPACE}" set image "deploy/${TARGET_DEPLOYMENT}" "${TARGET_DEPLOYMENT}=${IMAGE}"
+    echo "==> waiting for rollout"
+    kubectl -n "${TARGET_NAMESPACE}" rollout status "deploy/${TARGET_DEPLOYMENT}" --timeout=10m
+    echo "==> live at https://trialday.bluebuck-micro.ts.net"
+---
+# 22:00 UTC = 6pm America/New_York (during EDT). Mon-Fri only.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trialday-builder
+  namespace: trialday
+spec:
+  schedule: "0 22 * * 1-5"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 2700      # 45 min hard kill
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: trialday-builder }
+        spec:
+          restartPolicy: Never
+          serviceAccountName: trialday-builder
+          initContainers:
+            - name: clone-and-test
+              image: node:22-slim
+              command: ["/bin/bash", "/scripts/clone-and-test.sh"]
+              env:
+                - { name: HOME, value: "/root" }
+                - name: GIT_REPO_URL
+                  valueFrom: { configMapKeyRef: { name: trialday-builder-config, key: GIT_REPO_URL } }
+                - name: GIT_BRANCH
+                  valueFrom: { configMapKeyRef: { name: trialday-builder-config, key: GIT_BRANCH } }
+                - name: TARGET_NAMESPACE
+                  valueFrom: { configMapKeyRef: { name: trialday-builder-config, key: TARGET_NAMESPACE } }
+                - name: TARGET_DEPLOYMENT
+                  valueFrom: { configMapKeyRef: { name: trialday-builder-config, key: TARGET_DEPLOYMENT } }
+              volumeMounts:
+                - { name: workspace, mountPath: /workspace }
+                - { name: scripts,   mountPath: /scripts,   readOnly: true }
+                - { name: git-ssh,   mountPath: /secrets/git-ssh, readOnly: true }
+              resources:
+                requests: { cpu: "1",  memory: "1Gi" }
+                limits:   { cpu: "4",  memory: "4Gi" }
+            - name: build-and-push
+              image: gcr.io/kaniko-project/executor:debug
+              command: ["/busybox/sh", "/scripts/build-and-push.sh"]
+              env:
+                - name: REGISTRY
+                  valueFrom: { configMapKeyRef: { name: trialday-builder-config, key: REGISTRY } }
+                - name: IMAGE_NAME
+                  valueFrom: { configMapKeyRef: { name: trialday-builder-config, key: IMAGE_NAME } }
+                - name: PUBLIC_APP_URL
+                  valueFrom: { configMapKeyRef: { name: trialday-builder-config, key: PUBLIC_APP_URL } }
+              envFrom:
+                # Pulls every NEXT_PUBLIC_* (+ everything else) into the env.
+                # Kaniko only consumes vars referenced via --build-arg, so the
+                # private keys aren't baked into the image — but the env IS
+                # readable by anyone with logs access. Acceptable since this
+                # namespace is admin-only.
+                - secretRef: { name: trialday-env }
+              volumeMounts:
+                - { name: workspace, mountPath: /workspace }
+                - { name: scripts,   mountPath: /scripts,   readOnly: true }
+              resources:
+                requests: { cpu: "2",  memory: "3Gi" }
+                limits:   { cpu: "4",  memory: "6Gi" }
+          containers:
+            - name: rollout
+              image: bitnami/kubectl:latest
+              command: ["/bin/sh", "/scripts/rollout.sh"]
+              env:
+                - name: TARGET_NAMESPACE
+                  valueFrom: { configMapKeyRef: { name: trialday-builder-config, key: TARGET_NAMESPACE } }
+                - name: TARGET_DEPLOYMENT
+                  valueFrom: { configMapKeyRef: { name: trialday-builder-config, key: TARGET_DEPLOYMENT } }
+              volumeMounts:
+                - { name: workspace, mountPath: /workspace }
+                - { name: scripts,   mountPath: /scripts,   readOnly: true }
+              resources:
+                requests: { cpu: "100m", memory: "128Mi" }
+                limits:   { cpu: "500m", memory: "256Mi" }
+          volumes:
+            - name: workspace
+              emptyDir: {}
+            - name: scripts
+              configMap:
+                name: trialday-builder-config
+                items:
+                  - { key: clone-and-test.sh,  path: clone-and-test.sh,  mode: 0755 }
+                  - { key: build-and-push.sh,  path: build-and-push.sh,  mode: 0755 }
+                  - { key: rollout.sh,         path: rollout.sh,         mode: 0755 }
+            - name: git-ssh
+              # Reuses the same SSH deploy key as claude-worker. The key lives
+              # in the claude-worker namespace; we mirror it to this namespace
+              # at setup time (see the setup commands in the header).
+              secret:
+                secretName: git-ssh
+                defaultMode: 0600

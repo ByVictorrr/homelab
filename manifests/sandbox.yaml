@@ -1,9 +1,30 @@
 ---
-# A long-running Ubuntu pod for poking at — feels VM-ish.
-# /root is backed by a PVC so files you create there survive pod restarts.
-# Binaries you `apt install` inside the pod do NOT survive — they live at /usr/bin
-# which is on the container's ephemeral layer. To make tooling persist, bake a
-# custom image or move to KubeVirt (see PROGRESS.md).
+# A long-running Ubuntu pod for poking at — feels VM-ish. Now upgraded to a
+# "school Linux" with persistent tooling for EE/CompE coursework.
+#
+# What persists (on the PVC at /root):
+#   - Files you create
+#   - Tools installed in /root/local/bin (PATH already set, see init)
+#   - Repos cloned to /root/git
+#
+# What does NOT persist (lives on container ephemeral layer):
+#   - apt-installed packages in /usr/bin
+#
+# To install tools that survive restarts: clone source to /root/git/<tool>,
+# build with `--prefix=/root/local`, done. Or use conda/mamba in /root/conda.
+#
+# Pre-installed via initContainer on every restart (idempotent):
+#   - build-essential, git, curl, vim, htop, tmux
+#   - verilator + gtkwave (HDL sim + waveform viewing)
+#   - ghdl  (VHDL sim)
+#   - ngspice  (SPICE sim)
+#   - qemu-system-misc + qemu-user-static (RISC-V, ARM, etc. ISA experimentation)
+#   - gcc-riscv64-unknown-elf + binutils  (RISC-V cross toolchain)
+#   - octave  (MATLAB-equivalent)
+#   - python3 + pip
+#
+# Open a shell:
+#   kubectl -n sandbox exec -it deploy/sandbox -- bash
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -16,6 +37,14 @@ metadata:
   namespace: sandbox
 spec:
   accessModes: [ReadWriteOnce]
+  # NB: this was originally local-path 5Gi. PVCs are mostly immutable;
+  # to migrate to Longhorn 50Gi:
+  #   1. kubectl -n sandbox cp deploy/sandbox:/root /tmp/sandbox-backup
+  #   2. kubectl -n sandbox delete deploy sandbox
+  #   3. kubectl -n sandbox delete pvc sandbox-home
+  #   4. Edit this block to storageClassName: longhorn / storage: 50Gi
+  #   5. kubectl apply -f manifests/sandbox.yaml
+  #   6. kubectl -n sandbox cp /tmp/sandbox-backup deploy/sandbox:/root/
   storageClassName: local-path
   resources:
     requests:
@@ -38,6 +67,29 @@ spec:
       labels:
         app: sandbox
     spec:
+      initContainers:
+        # Install EE/CompE toolchain on every pod start. apt is idempotent;
+        # this skips installed packages, so restart is ~5s after first run.
+        - name: tools
+          image: ubuntu:24.04
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -e
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential git curl vim htop tmux ca-certificates \
+                verilator gtkwave ghdl ngspice \
+                qemu-system-misc qemu-user-static \
+                gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf \
+                octave python3 python3-pip python3-venv
+              # Seed /root with PATH + dirs for tools-that-persist.
+              install -d /root/local/bin /root/git /root/conda
+              grep -q 'PATH=.*local/bin' /root/.bashrc 2>/dev/null || \
+                echo 'export PATH=$HOME/local/bin:$PATH' >> /root/.bashrc
+          volumeMounts:
+            - { name: home, mountPath: /root }
       containers:
         - name: sandbox
           image: ubuntu:24.04
@@ -49,11 +101,11 @@ spec:
               mountPath: /root
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
+              cpu: "200m"
+              memory: "512Mi"
             limits:
-              cpu: "2"
-              memory: "2Gi"
+              cpu: "4"
+              memory: "4Gi"
       volumes:
         - name: home
           persistentVolumeClaim:

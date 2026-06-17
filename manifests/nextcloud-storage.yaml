@@ -1,0 +1,33 @@
+---
+# Static hostPath PV for Nextcloud's data dir, pinned to rpi-node1's 1TB SSD
+# (mounted at /mnt/nextcloud by playbooks/storage.yml).
+#
+# Apply this AFTER deleting nextcloud's old `nextcloud-data` PVC, then re-apply
+# manifests/nextcloud.yaml — its PVC declaration will bind to this PV by name.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nextcloud-data-host
+spec:
+  capacity:
+    storage: 900Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nextcloud-local
+  hostPath:
+    path: /mnt/nextcloud
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [rpi-node1]
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nextcloud-local
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain

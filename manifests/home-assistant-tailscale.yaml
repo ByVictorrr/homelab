@@ -1,0 +1,26 @@
+---
+# Expose Home Assistant over Tailscale at https://homeassistant.bluebuck-micro.ts.net.
+# Lets the HA mobile app reach the server from cellular / away from home.
+# Prereq: Tailscale operator installed (see PROGRESS.md).
+#
+# After applying:
+#   1. Find the actual hostname: kubectl -n home-assistant get ingress home-assistant-ts
+#   2. Add it to HA's trusted networks if you ever swap the trusted_proxies setup.
+#   3. In the HA mobile app: Settings → "Add server" → enter the ts.net URL.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: home-assistant-ts
+  namespace: home-assistant
+  annotations:
+    tailscale.com/hostname: "homeassistant"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - homeassistant
+  defaultBackend:
+    service:
+      name: home-assistant
+      port:
+        number: 80

@@ -1,0 +1,158 @@
+---
+# Network boot stack for x86 PCs and laptops on the LAN.
+#
+#   dnsmasq   — proxyDHCP + TFTP. proxyDHCP means it ONLY adds the PXE options
+#               (next-server, filename); the actual IP still comes from eero,
+#               so this DOES NOT conflict with eero's DHCP. Safe to run.
+#   ipxe      — small iPXE binary that the firmware loads first. iPXE then
+#               chainloads to netboot.xyz, which gives you a giant menu of
+#               OS installers (Ubuntu, Debian, Arch, Memtest86, rescue images,
+#               Windows 10/11 installers, etc.) — no local files to maintain.
+#
+# Use case: boot a target machine, press its PXE/network-boot key (F12/F11/F8
+# depending on firmware), pick "PXE / Network" → you'll see the netboot.xyz
+# menu in a few seconds. Pick what you want to install or live-boot.
+#
+# The dnsmasq pod is pinned to rpi-control + uses hostNetwork because PXE
+# clients broadcast DHCPDISCOVER on UDP/67. Pods normally can't see broadcast
+# traffic on the host LAN; hostNetwork bridges that.
+#
+# Caveats:
+#   - PXE/TFTP on a homelab is best-effort. Some flaky NICs need 2-3 tries.
+#   - This DOES NOT PXE-boot Raspberry Pis — Pi firmware needs a different
+#     setup (custom TFTP path + boot files). Use SD cards for that.
+#   - For UEFI machines, netboot.xyz is delivered as `netboot.xyz.efi`; BIOS
+#     legacy uses `netboot.xyz.kpxe`. Both are baked into the iPXE image below.
+#
+# First-time setup:
+#   1. kubectl apply -f manifests/pxe-boot.yaml
+#   2. kubectl -n pxe logs deploy/dnsmasq    # confirm it's listening
+#   3. Pick a target machine on the LAN, enter its boot menu, choose
+#      "PXE Boot" / "Network Boot". Should land at the netboot.xyz menu in 30s.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pxe
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tftp-root
+  namespace: pxe
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: nfs-1
+  volumeName: nfs-pxe            # binds to nfs-pxe PV (rpi-control:/mnt/nfs/pxe-tftp)
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Bootstrap Job — downloads the netboot.xyz iPXE binaries into the PVC.
+# Runs once on first apply; safe to leave around (the resulting pod just
+# completes and does nothing on re-run).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tftp-bootstrap
+  namespace: pxe
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: download
+          image: alpine:3.20
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              apk add --no-cache curl
+              cd /srv
+              [ -f netboot.xyz.kpxe ] || curl -fsSLo netboot.xyz.kpxe https://boot.netboot.xyz/ipxe/netboot.xyz.kpxe
+              [ -f netboot.xyz.efi  ] || curl -fsSLo netboot.xyz.efi  https://boot.netboot.xyz/ipxe/netboot.xyz.efi
+              [ -f netboot.xyz-undionly.kpxe ] || curl -fsSLo netboot.xyz-undionly.kpxe https://boot.netboot.xyz/ipxe/netboot.xyz-undionly.kpxe
+              ls -la /srv
+          volumeMounts:
+            - { name: tftp, mountPath: /srv }
+      volumes:
+        - name: tftp
+          persistentVolumeClaim:
+            claimName: tftp-root
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dnsmasq-conf
+  namespace: pxe
+data:
+  dnsmasq.conf: |
+    # Do NOT act as a regular DHCP — eero owns that.
+    port=0
+    log-dhcp
+
+    # proxyDHCP for the LAN range. The /24 here matches the LAN, NOT the cluster.
+    dhcp-range=192.168.4.0,proxy
+
+    # TFTP
+    enable-tftp
+    tftp-root=/srv/tftp
+    tftp-no-blocksize
+
+    # Distinguish UEFI vs legacy BIOS clients.
+    # https://wiki.archlinux.org/title/PXE  reference values for option 60 / 93.
+    dhcp-match=set:efi-x86_64,option:client-arch,7
+    dhcp-match=set:efi-x86_64,option:client-arch,9
+    dhcp-match=set:bios-x86,option:client-arch,0
+
+    # Hand the right boot file based on arch
+    dhcp-boot=tag:efi-x86_64,netboot.xyz.efi
+    dhcp-boot=tag:bios-x86,netboot.xyz.kpxe
+
+    # PXE menu (some clients require this even with dhcp-boot)
+    pxe-service=tag:efi-x86_64,X86-64_EFI,"netboot.xyz (UEFI)",netboot.xyz.efi
+    pxe-service=tag:bios-x86,x86PC,"netboot.xyz (BIOS)",netboot.xyz.kpxe
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dnsmasq
+  namespace: pxe
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: dnsmasq }
+  template:
+    metadata:
+      labels: { app: dnsmasq }
+    spec:
+      hostNetwork: true              # required: must see DHCP broadcasts
+      nodeName: rpi-control          # pin so the LAN address is known
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: dnsmasq
+          image: 4km3/dnsmasq:2.90-r3-alpine-latest
+          args: ["-d", "--conf-file=/etc/dnsmasq.d/dnsmasq.conf"]
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN", "NET_BIND_SERVICE", "NET_RAW"]
+          ports:
+            - { name: dhcp,      containerPort: 67, protocol: UDP }
+            - { name: tftp,      containerPort: 69, protocol: UDP }
+            - { name: pxe-proxy, containerPort: 4011, protocol: UDP }
+          volumeMounts:
+            - { name: conf, mountPath: /etc/dnsmasq.d }
+            - { name: tftp, mountPath: /srv/tftp }
+          resources:
+            requests: { cpu: "20m", memory: "32Mi" }
+            limits:   { cpu: "500m", memory: "128Mi" }
+      volumes:
+        - name: conf
+          configMap:
+            name: dnsmasq-conf
+            items:
+              - { key: dnsmasq.conf, path: dnsmasq.conf }
+        - name: tftp
+          persistentVolumeClaim:
+            claimName: tftp-root

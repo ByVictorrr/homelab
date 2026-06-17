@@ -1,0 +1,59 @@
+---
+# Cluster-wide self-signed CA, used to issue TLS certs for the *.nip.io LAN
+# ingresses. cert-manager is already running (see kubectl get pods -n cert-manager).
+#
+# Setup:
+#   kubectl apply -f manifests/cert-manager-ca.yaml
+#   # Wait for the CA cert to be issued:
+#   kubectl -n cert-manager get certificate cluster-ca
+#
+# Export the CA cert and import it into your devices so browsers stop warning:
+#   kubectl -n cert-manager get secret cluster-ca-tls \
+#     -o jsonpath='{.data.ca\.crt}' | base64 -d > rpi-cluster-ca.crt
+#   # Linux:   sudo cp rpi-cluster-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates
+#   # macOS:   double-click the .crt, add to System keychain, mark "Always Trust"
+#   # iOS/Android: AirDrop/email the .crt to the device and install as a profile
+#   # Firefox keeps its own store — Settings > Privacy > Certificates > Import.
+#
+# To rotate the CA (re-issues every leaf cert too):
+#   kubectl -n cert-manager delete secret cluster-ca-tls
+#   kubectl -n cert-manager delete certificate cluster-ca
+#   kubectl apply -f manifests/cert-manager-ca.yaml
+---
+# Bootstrap issuer — only used to sign the CA cert below.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-bootstrap
+spec:
+  selfSigned: {}
+---
+# The cluster's root CA cert. 10-year validity so we don't have to rotate often.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cluster-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: rpi-cluster-ca
+  secretName: cluster-ca-tls
+  duration: 87600h    # 10 years
+  renewBefore: 720h   # 30 days
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-bootstrap
+    kind: ClusterIssuer
+---
+# CA issuer — every ingress with cert-manager.io/cluster-issuer: cluster-ca
+# gets a cert signed by the root above. Trust the root once on each device,
+# and every service cert is trusted automatically.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: cluster-ca
+spec:
+  ca:
+    secretName: cluster-ca-tls

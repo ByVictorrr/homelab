@@ -1,0 +1,149 @@
+---
+# Jellyfin — self-hosted Plex. Streams your movies/shows/music to phones,
+# tablets, TVs, Apple TV (via the Jellyfin app on each).
+#
+# First-time setup:
+#   1. Decide where your media lives. Two common options:
+#        A) External USB drive on a Pi → mount on the host, change `mediaHostPath`
+#           below + nodeName to pin Jellyfin to that Pi.
+#        B) NFS share from a NAS → swap the `media` volume below for an NFS volume.
+#      For now this manifest uses a local-path PVC (10Gi placeholder); replace
+#      that with one of the above before you put real media in.
+#   2. kubectl apply -f manifests/jellyfin.yaml
+#   3. Browse to http://jellyfin.192.168.4.27.nip.io
+#      - Run the setup wizard (admin user, libraries pointing at /media/...).
+#   4. On phones/TVs: install the official "Jellyfin" app, point it at the URL.
+#
+# Hardware acceleration: Pi 5 has a VideoCore VII GPU but Jellyfin's HW transcode
+# support on Pi 5 is experimental / not great. Plan to "Direct Play" content the
+# clients already support (H.264, AAC, etc.); leave transcoding off for now.
+#
+# Useful settings post-install:
+#   - Dashboard → Playback → enable "Allow on the fly media conversion": OFF
+#     (forces clients to direct-play; saves Pi CPU)
+#   - Dashboard → Networking → set "Published Server URIs" to your URLs
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jellyfin
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jellyfin-config
+  namespace: jellyfin
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Placeholder media volume. Replace with hostPath (USB drive) or NFS before
+# putting real media in — local-path on a Pi SD card is too small for libraries.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jellyfin-media
+  namespace: jellyfin
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: nfs-1
+  volumeName: nfs-media           # rpi-control:/mnt/nfs/media (see manifests/nfs-storage.yaml)
+  resources:
+    requests:
+      storage: 900Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jellyfin
+  namespace: jellyfin
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: jellyfin
+  template:
+    metadata:
+      labels:
+        app: jellyfin
+    spec:
+      containers:
+        - name: jellyfin
+          image: jellyfin/jellyfin:latest
+          ports:
+            - containerPort: 8096
+          env:
+            - name: TZ
+              value: "America/Los_Angeles"
+            - name: JELLYFIN_PublishedServerUrl
+              value: "https://jellyfin.192.168.4.27.nip.io"
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: cache,  mountPath: /cache }
+            - { name: media,  mountPath: /media }
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "4"
+              memory: "2Gi"
+      volumes:
+        - { name: config, persistentVolumeClaim: { claimName: jellyfin-config } }
+        - { name: cache,  emptyDir: { sizeLimit: 2Gi } }
+        - { name: media,  persistentVolumeClaim: { claimName: jellyfin-media } }
+        # Example replacement for `media` if you have a USB drive on rpi-node1
+        # mounted at /mnt/media:
+        # - name: media
+        #   hostPath:
+        #     path: /mnt/media
+        #     type: Directory
+        # Example for NFS:
+        # - name: media
+        #   nfs:
+        #     server: 192.168.4.10
+        #     path: /export/media
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jellyfin
+  namespace: jellyfin
+spec:
+  selector:
+    app: jellyfin
+  ports:
+    - port: 80
+      targetPort: 8096
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jellyfin
+  namespace: jellyfin
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"          # no upload cap
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    cert-manager.io/cluster-issuer: cluster-ca
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [jellyfin.192.168.4.27.nip.io]
+      secretName: jellyfin-tls
+  rules:
+    - host: jellyfin.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: jellyfin
+                port:
+                  number: 80

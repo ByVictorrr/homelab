@@ -1,0 +1,20 @@
+---
+# Expose Audiobookshelf on Tailscale at https://audiobooks.bluebuck-micro.ts.net.
+# The official iOS / Android apps work great with this URL.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: audiobookshelf-ts
+  namespace: audiobookshelf
+  annotations:
+    tailscale.com/hostname: "audiobooks"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - audiobooks
+  defaultBackend:
+    service:
+      name: audiobookshelf
+      port:
+        number: 80

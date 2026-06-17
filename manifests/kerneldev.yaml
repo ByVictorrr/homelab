@@ -1,0 +1,155 @@
+---
+# kerneldev — a long-running Ubuntu pod tuned for kernel-module work and
+# remote-debug from CLion (or VS Code Remote, or just plain ssh + gdb).
+#
+# What's different from `sandbox`:
+#   - openssh-server with key-based auth on NodePort 30024 → SSH from your laptop.
+#     CLion: Settings → Build, Execution, Deployment → Toolchains → Remote Host
+#     points at `kerneldev.lan:30024`. Files sync to the pod's PVC; build runs
+#     in the pod; gdb runs in the pod against a QEMU-hosted target.
+#   - Pre-installed kernel sources + headers for the same kernel running on
+#     the Pi (so `make modules_install` works if you ever want to test on the Pi
+#     itself — but DO NOT load modules into the host kernel by default; use the
+#     QEMU recipe below to test inside a throwaway kernel).
+#   - QEMU (system-aarch64, system-x86_64, system-riscv64) with the gdb-stub
+#     workflow set up: launch a kernel under QEMU `-s -S`, attach gdb-multiarch
+#     to localhost:1234, step through your module.
+#
+# After applying:
+#   1. ssh-copy-id from your laptop:
+#        kubectl -n kerneldev exec -it deploy/kerneldev -- bash -c \
+#          'mkdir -p /root/.ssh && cat >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys' \
+#          < ~/.ssh/id_ed25519.pub
+#   2. Test SSH from your laptop:
+#        ssh -p 30024 root@192.168.4.27
+#   3. In CLion: New Toolchain → Remote Host → Host=192.168.4.27 Port=30024 User=root
+#                Add CMake/Makefile profile that uses this toolchain.
+#
+# Typical kernel-module debug session (inside the pod):
+#   # 1. Build your module
+#   cd /root/kmod && make
+#   # 2. Boot a throwaway kernel under QEMU with gdb stub
+#   qemu-system-aarch64 -M virt -cpu cortex-a72 -smp 2 -m 1G \
+#     -kernel /root/kernel/linux/arch/arm64/boot/Image \
+#     -append "console=ttyAMA0 nokaslr earlyprintk" \
+#     -nographic -s -S \
+#     -netdev user,id=net0 -device virtio-net-device,netdev=net0
+#   # 3. In another shell (or via CLion's remote gdb runner):
+#   gdb-multiarch /root/kernel/linux/vmlinux \
+#     -ex 'target remote :1234' \
+#     -ex 'add-symbol-file /root/kmod/mymod.ko 0x...' \
+#     -ex 'b mymod_init'
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kerneldev
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kerneldev-home
+  namespace: kerneldev
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 80Gi   # kernel source tree alone is ~5GB; leave headroom
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kerneldev
+  namespace: kerneldev
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: kerneldev }
+  template:
+    metadata:
+      labels: { app: kerneldev }
+    spec:
+      initContainers:
+        - name: bootstrap
+          image: ubuntu:24.04
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -e
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential bc bison flex libssl-dev libelf-dev \
+                git curl ca-certificates vim tmux htop rsync \
+                openssh-server \
+                qemu-system-arm qemu-system-x86 qemu-system-misc qemu-utils \
+                gdb-multiarch \
+                linux-headers-generic \
+                python3 python3-pip
+              # SSH setup — listen on 22 inside the pod
+              install -d -m 700 /root/.ssh
+              touch /root/.ssh/authorized_keys
+              chmod 600 /root/.ssh/authorized_keys
+              # Allow root login with key only
+              sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+              sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/'  /etc/ssh/sshd_config
+              ssh-keygen -A
+              # Seed dirs
+              install -d /root/kmod /root/kernel /root/local/bin /root/git
+              grep -q 'PATH=.*local/bin' /root/.bashrc 2>/dev/null || \
+                echo 'export PATH=$HOME/local/bin:$PATH' >> /root/.bashrc
+          volumeMounts:
+            - { name: home, mountPath: /root }
+      containers:
+        - name: kerneldev
+          image: ubuntu:24.04
+          # sshd runs in foreground so the container stays alive on it.
+          command: ["bash", "-c"]
+          args:
+            - |
+              export DEBIAN_FRONTEND=noninteractive
+              # Tools already installed by the initContainer — re-run for image refresh case.
+              dpkg -s openssh-server >/dev/null 2>&1 || apt-get update && apt-get install -y openssh-server
+              mkdir -p /run/sshd
+              exec /usr/sbin/sshd -D -e
+          ports:
+            - { name: ssh, containerPort: 22 }
+          volumeMounts:
+            - { name: home,   mountPath: /root }
+            # Shared NFS drop-zone. Same /mnt/nfs/shared that the HTTP file
+            # server exposes at https://files.bluebuck-micro.ts.net/. Anything
+            # you write to /root/shared in the pod is downloadable from that
+            # URL, and anything dropped via the web/file-server is visible here.
+            # Also mountable on Mac Finder: nfs://192.168.4.27/mnt/nfs/shared
+            - { name: shared, mountPath: /root/shared }
+          securityContext:
+            # Needed if you want to use KVM acceleration (Pi 5 supports it).
+            # /dev/kvm hostPath mount also needed (see below).
+            privileged: false   # flip to true if you mount /dev/kvm
+          resources:
+            requests: { cpu: "200m", memory: "1Gi" }
+            limits:   { cpu: "4",    memory: "6Gi" }
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: kerneldev-home
+        # Inline NFS mount (not via PVC) — bypasses 1:1 PV binding so multiple
+        # pods can mount the same path without contention. RWX semantics.
+        - name: shared
+          nfs:
+            server: 192.168.4.27
+            path: /mnt/nfs/shared
+---
+# SSH on NodePort 30024 so `ssh -p 30024 root@<any-node>` works from your laptop.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kerneldev-ssh
+  namespace: kerneldev
+spec:
+  type: NodePort
+  selector: { app: kerneldev }
+  ports:
+    - { name: ssh, port: 22, targetPort: 22, nodePort: 30024 }

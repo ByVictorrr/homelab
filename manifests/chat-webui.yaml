@@ -128,8 +128,13 @@ kind: Ingress
 metadata:
   name: open-webui
   namespace: chat
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
 spec:
   ingressClassName: nginx
+  tls:
+    - hosts: [chat.192.168.4.27.nip.io]
+      secretName: open-webui-tls
   rules:
     - host: chat.192.168.4.27.nip.io
       http:

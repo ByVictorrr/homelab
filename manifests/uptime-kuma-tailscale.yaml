@@ -1,0 +1,20 @@
+---
+# Expose Uptime Kuma over Tailscale at https://uptime.bluebuck-micro.ts.net.
+# Prereq: Tailscale operator installed (see PROGRESS.md).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: uptime-kuma-ts
+  namespace: uptime-kuma
+  annotations:
+    tailscale.com/hostname: "uptime"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - uptime
+  defaultBackend:
+    service:
+      name: uptime-kuma
+      port:
+        number: 80

@@ -1,0 +1,132 @@
+---
+# Vaultwarden — self-hosted Bitwarden-compatible password manager.
+# Stores everything in SQLite + attachments on a PVC. Tiny RAM footprint.
+#
+# First-time setup:
+#   1. Generate a strong admin token (used to access /admin):
+#        ADMIN_TOKEN=$(openssl rand -base64 48)
+#      Put it in the Secret:
+#        kubectl -n vaultwarden create secret generic vaultwarden-env \
+#          --from-literal=ADMIN_TOKEN="$ADMIN_TOKEN" \
+#          --dry-run=client -o yaml | kubectl apply -f -
+#   2. kubectl apply -f manifests/vaultwarden.yaml
+#   3. Browse to http://vault.192.168.4.27.nip.io
+#      - Create your account at /#/register
+#      - After everyone has signed up, visit /admin (use the token above) and
+#        set SIGNUPS_ALLOWED=false so randos can't register.
+#
+# ⚠️ WebAuthn / passkeys REQUIRE HTTPS. The nip.io URL is HTTP-only. For real
+# password-manager use, expose via Tailscale instead — copy chat-webui-tailscale.yaml
+# as a template (https://vault.bluebuck-micro.ts.net gets automatic TLS).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vaultwarden
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vaultwarden-data
+  namespace: vaultwarden
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+# Replace ADMIN_TOKEN with: kubectl create secret ... --dry-run -o yaml | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vaultwarden-env
+  namespace: vaultwarden
+type: Opaque
+stringData:
+  ADMIN_TOKEN: "REPLACE_ME"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vaultwarden
+  namespace: vaultwarden
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vaultwarden
+  template:
+    metadata:
+      labels:
+        app: vaultwarden
+    spec:
+      containers:
+        - name: vaultwarden
+          image: vaultwarden/server:latest
+          ports:
+            - containerPort: 80
+          env:
+            - name: DOMAIN
+              value: "https://vault.192.168.4.27.nip.io"
+            - name: SIGNUPS_ALLOWED
+              value: "true"           # flip to "false" after everyone registers
+            - name: WEBSOCKET_ENABLED
+              value: "true"
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vaultwarden-env
+                  key: ADMIN_TOKEN
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: vaultwarden-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vaultwarden
+  namespace: vaultwarden
+spec:
+  selector:
+    app: vaultwarden
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vaultwarden
+  namespace: vaultwarden
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "128m"   # larger attachments
+    cert-manager.io/cluster-issuer: cluster-ca
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [vault.192.168.4.27.nip.io]
+      secretName: vaultwarden-tls
+  rules:
+    - host: vault.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vaultwarden
+                port:
+                  number: 80

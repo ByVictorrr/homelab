@@ -1,0 +1,86 @@
+---
+# Glances — per-host system monitor. Runs as a DaemonSet (one pod per node),
+# reads the host's /proc and /sys via volume mounts, exposes a web API on
+# port 61208 of each Pi's LAN IP (via hostNetwork). Home Assistant's "Glances"
+# integration polls each Pi separately and surfaces a device per node with
+# CPU temp, throttling, CPU%, RAM, disk, network, processes.
+#
+# After applying:
+#   1. Check each Pi exposes Glances:
+#        curl http://192.168.4.27:61208/api/4/cpu     # control
+#        curl http://192.168.4.95:61208/api/4/cpu     # node1
+#        curl http://192.168.4.91:61208/api/4/cpu     # node2
+#        curl http://192.168.4.94:61208/api/4/cpu     # node3
+#   2. In Home Assistant:
+#        Settings → Devices & Services → + Add Integration → search "Glances"
+#        - Name: rpi-control
+#        - Host: 192.168.4.27
+#        - Port: 61208
+#        - Version: 4
+#      Repeat for each of the other 3 Pis (node1/2/3).
+#   3. Now in HA you'll see a device per Pi with sensors: cpu_use_percent,
+#      memory_use_percent, processor_temperature (this one gives you the
+#      CPU temp), disk_use_percent, etc. Add to your dashboard / set up
+#      automations (alert when any Pi >80 °C, etc).
+#
+# Pi-specific gotchas:
+#   - Glances reads thermal info from /sys/class/thermal/thermal_zone*/temp.
+#     The hostPath mount below exposes that.
+#   - Throttling state (vcgencmd get_throttled) is NOT exposed by Glances.
+#     If you want that, add a tiny MQTT-publishing script as a sidecar later.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: glances
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: glances
+  template:
+    metadata:
+      labels:
+        app: glances
+    spec:
+      hostNetwork: true        # so the API is reachable at <node-ip>:61208 from HA
+      hostPID: true            # so process counts / per-process stats are host-wide
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations:
+        - operator: Exists     # also run on the control-plane node
+      containers:
+        - name: glances
+          image: nicolargo/glances:latest-full
+          args:
+            - "glances"
+            - "-w"             # web server mode
+            - "--disable-plugin"
+            - "docker,podman"  # we're not using these on the host
+          env:
+            - name: TZ
+              value: "America/Los_Angeles"
+          ports:
+            - { containerPort: 61208, hostPort: 61208, name: web }
+          volumeMounts:
+            - { name: proc,  mountPath: /host/proc,  readOnly: true }
+            - { name: sys,   mountPath: /host/sys,   readOnly: true }
+            - { name: etcos, mountPath: /host/etc/os-release, readOnly: true }
+          securityContext:
+            # Read-only metric collection — no need for full privileged.
+            # capabilities to read sysfs hwmon are default-allowed for non-root mounts.
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - { name: proc,  hostPath: { path: /proc } }
+        - { name: sys,   hostPath: { path: /sys } }
+        - { name: etcos, hostPath: { path: /etc/os-release } }

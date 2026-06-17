@@ -1,0 +1,123 @@
+---
+# Anki sync server — point your Anki desktop/iOS/Android client at this
+# instead of AnkiWeb. All decks stay on your tailnet, free, no account caps.
+#
+# IMAGE STATUS (2026-06): the arm64 image situation is in flux. Modern Anki
+# (2.1.57+) needs the Rust sync-server. Tried:
+#   - docker.io/ankicommunity/anki-sync-server:latest  → tag not found
+#   - ghcr.io/ankicommunity/anki-sync-server-rs:latest → ghcr 403 anonymous
+# Workable options (pick one before applying):
+#   (a) Build your own arm64 image: FROM rust:slim → cargo install anki-sync-server
+#   (b) Use kuklinistvan/anki-sync-server:latest — old Python server, only
+#       works with Anki ≤2.1.56 clients.
+#   (c) Wait — official Anki has been promising an Anki-shipped sync server
+#       container; check https://github.com/ankitects/anki/issues periodically.
+# Until one of those is sorted, this manifest is intentionally NOT applied
+# (use `kubectl apply -f` on it once you've chosen an image).
+#
+# Setup:
+#   1. Set ANKI_SYNC_USERNAME / ANKI_SYNC_PASSWORD in the secret below.
+#   2. kubectl apply -f manifests/ankisyncd.yaml
+#   3. In Anki desktop → Tools → Preferences → Network:
+#        Self-hosted sync server URL: http://anki.192.168.4.27.nip.io/
+#        (or your tailnet URL once you add a TS Ingress)
+#   4. Click Sync. Sign in with the username/password you set.
+#   5. Same URL works on AnkiMobile (iOS) and AnkiDroid.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: anki
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: anki-creds
+  namespace: anki
+type: Opaque
+stringData:
+  username: victord
+  password: zIK3IGyhnnhal6fCeB5qgnV
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: anki-data
+  namespace: anki
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ankisyncd
+  namespace: anki
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: ankisyncd }
+  template:
+    metadata:
+      labels: { app: ankisyncd }
+    spec:
+      containers:
+        - name: ankisyncd
+          # Rust port maintained by ankicommunity. Supports Anki 2.1.57+.
+          image: ghcr.io/ankicommunity/anki-sync-server-rs:latest
+          env:
+            # Format: "username:password"  (the env var takes the full pair)
+            - name: SYNC_USER1
+              value: $(USERNAME):$(PASSWORD)
+            - name: USERNAME
+              valueFrom:
+                secretKeyRef: { name: anki-creds, key: username }
+            - name: PASSWORD
+              valueFrom:
+                secretKeyRef: { name: anki-creds, key: password }
+          ports:
+            - { containerPort: 27701 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          resources:
+            requests: { cpu: "50m",  memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: anki-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ankisyncd
+  namespace: anki
+spec:
+  selector: { app: ankisyncd }
+  ports:
+    - { port: 80, targetPort: 27701 }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ankisyncd
+  namespace: anki
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [anki.192.168.4.27.nip.io]
+      secretName: ankisyncd-tls
+  rules:
+    - host: anki.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: ankisyncd, port: { number: 80 } }

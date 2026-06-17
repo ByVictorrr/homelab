@@ -1,0 +1,535 @@
+---
+# claude-worker — autonomous Claude Code "work day" on the cluster.
+#
+# Three CronJobs (9am / 1pm / 5pm ET, Mon-Fri) each spin up a pod that:
+#   1. Installs `@anthropic-ai/claude-code` from npm (~30s on a Pi)
+#   2. Clones ByVictorrr/trialday via SSH (was: worksim, renamed)
+#   3. Checks out (or creates) branch `auto/main` — a single rolling branch
+#      so each session continues where the prior one left off, day to day.
+#   4. Reads WORKLOG.md to see where the previous session left off
+#   5. Runs `claude -p` with the timeslot-specific prompt (morning / midday / evening)
+#   6. Commits + pushes any changes Claude made
+#
+# Then at 6pm ET, `manifests/trialday-builder.yaml` rebuilds the cluster
+# trialday pod from the tip of auto/main, so https://trialday.bluebuck-micro.ts.net
+# shows the day's work next morning.
+#
+# Each run also publishes its raw log + the day's WORKLOG.md to
+# https://files.bluebuck-micro.ts.net/shared/claude-worker/  (autoindex from nginx
+# http-fileserver) and regenerates an index.html dashboard there.
+#
+# Focused on the JD → job simulation feature of TrialDay. Never touches the
+# real `main` branch — auto/main is the workspace; you merge auto/main → main
+# yourself when ready to ship to Vercel prod.
+#
+# ============================================================================
+# ONE-TIME SETUP — populate the two Secrets out-of-band (don't commit real keys)
+# ============================================================================
+#
+# 1) Anthropic API key:
+#      kubectl -n claude-worker create secret generic anthropic-api \
+#        --from-literal=api-key='sk-ant-...' \
+#        --dry-run=client -o yaml | kubectl apply -f -
+#
+# 2) GitHub SSH deploy key (RW) for ByVictorrr/worksim:
+#      ssh-keygen -t ed25519 -f /tmp/claude-worker -N '' -C 'claude-worker@cluster'
+#      # Add /tmp/claude-worker.pub to GitHub → worksim repo → Settings → Deploy keys
+#      #   ✓ Allow write access
+#      ssh-keyscan github.com > /tmp/known_hosts
+#      kubectl -n claude-worker create secret generic git-ssh \
+#        --from-file=id_ed25519=/tmp/claude-worker \
+#        --from-file=known_hosts=/tmp/known_hosts \
+#        --dry-run=client -o yaml | kubectl apply -f -
+#      rm /tmp/claude-worker /tmp/claude-worker.pub /tmp/known_hosts
+#
+# 3) Apply:
+#      kubectl apply -f manifests/claude-worker.yaml
+#
+# ============================================================================
+# WATCHING IT WORK
+# ============================================================================
+#
+#   kubectl -n claude-worker get cronjobs
+#   kubectl -n claude-worker get jobs
+#   kubectl -n claude-worker logs -l app=claude-worker --tail=200
+#
+#   # Trigger one manually (e.g. test the morning prompt right now):
+#   kubectl -n claude-worker create job --from=cronjob/claude-morning manual-$(date +%s)
+#
+# To pause: `kubectl -n claude-worker patch cronjob claude-morning -p '{"spec":{"suspend":true}}'`
+# (repeat for midday/evening). Same with `false` to resume.
+#
+# Cron times are UTC. Currently EDT (UTC-4), so:
+#   13:00 UTC = 9am  ET
+#   17:00 UTC = 1pm  ET
+#   21:00 UTC = 5pm  ET
+# When EST kicks in (Nov-Mar) these slide an hour earlier in local time. Adjust
+# the cron expressions if you care; the workday-emulation point is unchanged.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: claude-worker
+---
+# NOTE: The `anthropic-api` and `git-ssh` Secrets are intentionally NOT in this
+# manifest. They're created out-of-band (see header) so that re-applying this
+# file (to update prompts, schedules, etc.) never clobbers your real keys.
+# The CronJobs below reference them by name; pods will FailedScheduling if
+# they're missing.
+---
+# Prompts, the runner script, and shared config. Editing this ConfigMap +
+# `kubectl rollout` is the fast iteration path — no image rebuild needed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-worker-config
+  namespace: claude-worker
+data:
+  GIT_REPO_URL: "git@github.com:ByVictorrr/worksim.git"
+  GIT_USER_NAME: "claude-worker"
+  GIT_USER_EMAIL: "claude-worker@bluebuck-micro.ts.net"
+  CLAUDE_MODEL: "claude-sonnet-4-6"
+  CLAUDE_MAX_TURNS: "30"
+
+  run.sh: |
+    #!/usr/bin/env bash
+    # Entrypoint: clone, prep branch, run claude, push.
+    set -euo pipefail
+
+    TIMESLOT="${TIMESLOT:?must be morning|midday|evening}"
+    DATE="$(date -u +%Y-%m-%d)"
+    TIME="$(date -u +%H%MZ)"
+    # Single rolling branch so each session continues yesterday's work.
+    # The end-of-day trialday builder rebuilds from the tip of this branch.
+    BRANCH="auto/main"
+    WORKDIR="${HOME}/work"
+    OUTDIR="/output/claude-worker/${DATE}"
+    LOG_FILE="/tmp/run-${TIMESLOT}.log"
+
+    # Tee all output to a log file so we can publish it to the HTTP fileserver
+    # at the end of the run. `kubectl logs` still works in parallel.
+    exec > >(tee -a "$LOG_FILE") 2>&1
+
+    # Ensure we publish the log no matter how we exit (success, failure, timeout).
+    publish_log() {
+      mkdir -p "$OUTDIR" 2>/dev/null || true
+      cp "$LOG_FILE" "${OUTDIR}/${TIMESLOT}-${TIME}.log" 2>/dev/null || true
+      # Also copy the day's WORKLOG.md if claude ran far enough to clone the repo.
+      [ -f "${WORKDIR}/WORKLOG.md" ] && cp "${WORKDIR}/WORKLOG.md" "${OUTDIR}/WORKLOG.md" 2>/dev/null || true
+      chmod -R a+r "${OUTDIR}" 2>/dev/null || true
+    }
+
+    # Regenerate index.html dashboard from the file tree under /output/claude-worker.
+    generate_dashboard() {
+      local root="/output/claude-worker"
+      cd "$root" 2>/dev/null || return 0
+      {
+        echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>claude-worker</title>'
+        echo '<style>body{font-family:-apple-system,system-ui,sans-serif;max-width:920px;margin:40px auto;padding:0 20px;color:#222;line-height:1.5}'
+        echo 'h1{border-bottom:2px solid #eee;padding-bottom:10px}h2{margin-top:32px;color:#555;font-size:18px}'
+        echo 'ul{list-style:none;padding-left:0}li{padding:6px 0;border-bottom:1px solid #f0f0f0}'
+        echo 'a{color:#0366d6;text-decoration:none}a:hover{text-decoration:underline}'
+        echo '.timeslot{display:inline-block;width:80px;font-weight:600;color:#666}.meta{color:#999;font-size:12px}</style></head><body>'
+        echo '<h1>claude-worker &mdash; autonomous iteration log</h1>'
+        echo '<p><a href="https://github.com/ByVictorrr/trialday/tree/auto/main">&rarr; auto/main branch on GitHub</a> | '
+        echo '<a href="https://trialday.bluebuck-micro.ts.net">&rarr; cluster trialday</a></p>'
+        for date_dir in $(ls -d 20*/ 2>/dev/null | sort -r); do
+          d=${date_dir%/}
+          echo "<h2>$d</h2><ul>"
+          for log in $(ls "${date_dir}"*.log 2>/dev/null | sort); do
+            slot=$(basename "$log" .log)
+            timeslot_name="${slot%%-*}"
+            echo "<li><span class=\"timeslot\">${timeslot_name}</span><a href=\"${date_dir}$(basename "$log")\">${slot}.log</a></li>"
+          done
+          if [ -f "${date_dir}WORKLOG.md" ]; then
+            echo "<li><span class=\"timeslot\">worklog</span><a href=\"${date_dir}WORKLOG.md\">WORKLOG.md (end-of-session)</a></li>"
+          fi
+          echo "</ul>"
+        done
+        echo '<p class="meta">Generated by claude-worker. Each run regenerates this page.</p>'
+        echo '</body></html>'
+      } > index.html.tmp 2>/dev/null && mv index.html.tmp index.html 2>/dev/null || true
+      chmod a+r index.html 2>/dev/null || true
+    }
+
+    trap 'publish_log; generate_dashboard' EXIT
+
+    echo "==> [$(date -u +%H:%M:%SZ)] timeslot=${TIMESLOT} branch=${BRANCH}"
+    echo "==> log will publish to: https://files.bluebuck-micro.ts.net/shared/claude-worker/${DATE}/${TIMESLOT}-${TIME}.log"
+
+    # --- Install git + ssh client (node:22-slim has neither) -------------
+    if ! command -v git >/dev/null 2>&1; then
+      echo "==> apt install git openssh-client"
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq --no-install-recommends git openssh-client ca-certificates
+    fi
+
+    # --- SSH setup from mounted secret -----------------------------------
+    mkdir -p "${HOME}/.ssh"
+    chmod 700 "${HOME}/.ssh"
+    install -m 600 /secrets/git-ssh/id_ed25519 "${HOME}/.ssh/id_ed25519"
+    # Fresh keyscan at runtime — more reliable than the pre-baked known_hosts
+    # in the secret (which can be empty/malformed if the laptop's ssh-keyscan
+    # was misconfigured at secret-creation time).
+    ssh-keyscan -t rsa,ecdsa,ed25519 github.com > "${HOME}/.ssh/known_hosts" 2>/dev/null
+
+    git config --global user.name  "${GIT_USER_NAME}"
+    git config --global user.email "${GIT_USER_EMAIL}"
+
+    # --- Install claude code --------------------------------------------
+    echo "==> installing @anthropic-ai/claude-code"
+    npm install -g --silent @anthropic-ai/claude-code
+
+    # --- Clone + branch --------------------------------------------------
+    rm -rf "${WORKDIR}"
+    # Try the rolling branch first. If it doesn't exist (first ever run),
+    # clone main and create it.
+    if git clone --depth 30 --branch "${BRANCH}" "${GIT_REPO_URL}" "${WORKDIR}" 2>/dev/null; then
+      echo "==> resumed existing branch ${BRANCH}"
+    else
+      echo "==> branch ${BRANCH} doesn't exist yet — cloning main and creating it"
+      git clone --depth 30 "${GIT_REPO_URL}" "${WORKDIR}"
+      cd "${WORKDIR}" && git checkout -B "${BRANCH}" && cd -
+    fi
+    cd "${WORKDIR}"
+
+    # Ensure WORKLOG exists so the prompt can read it on day 1.
+    [ -f WORKLOG.md ] || cat > WORKLOG.md <<'EOF'
+    # Auto Worklog
+
+    Fresh start. No prior context.
+    EOF
+
+    # --- Run claude ------------------------------------------------------
+    # No --max-turns: the 1h activeDeadlineSeconds is the real cap, and 30 turns
+    # was getting eaten by codebase exploration before any edits landed.
+    PROMPT_FILE="/prompts/${TIMESLOT}.md"
+    echo "==> running claude (model=${CLAUDE_MODEL})"
+    claude \
+      --print \
+      --dangerously-skip-permissions \
+      --model "${CLAUDE_MODEL}" \
+      < "${PROMPT_FILE}" \
+      || echo "==> claude exited non-zero (continuing to push anything it managed to commit)"
+
+    # --- Push whatever ended up committed --------------------------------
+    if git diff --quiet "origin/${BRANCH}" 2>/dev/null; then
+      echo "==> no new commits to push"
+    else
+      echo "==> pushing ${BRANCH}"
+      git push --set-upstream origin "${BRANCH}"
+    fi
+
+    echo "==> done"
+
+  morning.md: |
+    It is the start of the work day (~9am Monday-Friday). You are the only
+    engineer on shift; you have until the next session (~1pm) to make
+    forward progress.
+
+    Focus area: the **JD → job simulation** pipeline of TrialDay (this repo,
+    ByVictorrr/worksim). Relevant entry points include the white-collar JD
+    classifier, role routing, and the simulation generation flow.
+
+    Process:
+
+    1. Read `WORKLOG.md`. If it has unfinished work from a prior session,
+       resume that — do not start something new.
+    2. Otherwise, pick **one** concrete, scoped improvement from `ROADMAP.md`,
+       `todo.md`, recent commit messages, or open TODOs in the JD/sim code.
+       Prefer something you can finish (or meaningfully advance) in one
+       session.
+    3. Write a short plan at the top of `WORKLOG.md`: what you're doing, why,
+       and the success criterion. Keep prior entries below.
+    4. Implement. Run the relevant tests (`npm test` or a narrower vitest run
+       if faster) before you commit. If tests fail, fix them before
+       committing — never commit a red build.
+    5. Commit in small logical chunks with conventional-commit messages
+       (`feat(sim): ...`, `fix(jd): ...`, `test: ...`). You are on branch
+       `auto/main` — never push to the real `main`.
+    6. Update `WORKLOG.md` with what's done and what's left, then commit
+       that too.
+
+    Rules:
+    - Do NOT touch `.env`, `.env.local`, Stripe/Clerk/Supabase keys, or any
+      secret-shaped file.
+    - Do NOT modify CI workflows under `.github/` unless the task explicitly
+      requires it.
+    - Do NOT run `git push` yourself — the runner pushes after you exit.
+    - If a task turns out to be larger than one session, leave a clear
+      handoff note in `WORKLOG.md` and commit what works.
+
+  midday.md: |
+    It is midday (~1pm). The morning session has already run. You're
+    continuing the same workday on branch `auto/main`.
+
+    Process:
+
+    1. Read `WORKLOG.md` to see what the morning session planned and what
+       state it left things in.
+    2. If tests are broken, fix them first. A red build is the top priority.
+    3. Continue the morning's task. If it's already finished and committed,
+       pick the next item from the morning's plan (or the next obvious
+       improvement in the JD → simulation area).
+    4. Same commit hygiene as the morning: small commits, conventional
+       messages, tests green before committing.
+    5. Update `WORKLOG.md` with progress + what's left for the evening
+       session.
+
+    Same rules as morning: no `.env` edits, no `.github/` edits unless asked,
+    no `git push` (the runner does it).
+
+  evening.md: |
+    It is end-of-day (~5pm). This is the last session of the workday on
+    branch `auto/main`. The cluster `trialday` builder will rebuild the
+    `https://trialday.bluebuck-micro.ts.net` pod from the tip of this branch
+    starting at 6pm — so whatever you push must build, test, and deploy
+    cleanly.
+
+    Your job is to **leave a clean handoff** — not start anything ambitious.
+
+    Process:
+
+    1. Read `WORKLOG.md` and `git status`.
+    2. If there's uncommitted work that's nearly done, finish a small slice
+       that's committable. If it's not finishable in a few turns, revert it
+       (`git restore`) and leave a clear TODO comment + worklog note instead
+       of committing broken code.
+    3. Run the full relevant test suite. Make sure the tip of the branch is
+       green. If you broke something earlier in the day that's still red,
+       fix it now or revert the offending commit.
+    4. Write a clear handoff section at the top of `WORKLOG.md`:
+       - **What got done today** (one or two bullets)
+       - **What's next** (the concrete task the morning session should pick
+         up)
+       - **Blockers / open questions** (if any)
+    5. Commit the worklog. That's it. Do not start a new feature.
+
+    Same rules: no `.env` edits, no `.github/` edits, no `git push`.
+---
+# Shared CronJob template. Each timeslot is a thin wrapper that sets TIMESLOT
+# and the schedule. apiVersion/kind below.
+# (YAML anchors don't survive across separated documents in kubectl, so we
+# repeat the spec — keep the three in sync.)
+
+# 9am ET (13:00 UTC during EDT) — Monday-Friday
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-morning
+  namespace: claude-worker
+spec:
+  schedule: "0 13 * * 1-5"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600   # hard kill at 1h
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: claude-worker, timeslot: morning }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: claude
+              image: node:22-slim
+              command: ["/bin/bash", "/scripts/run.sh"]
+              env:
+                - { name: TIMESLOT,    value: "morning" }
+                - { name: HOME,        value: "/root" }
+                - { name: IS_SANDBOX,  value: "1" }
+                - name: ANTHROPIC_API_KEY
+                  valueFrom: { secretKeyRef: { name: anthropic-api, key: api-key } }
+                - name: GIT_REPO_URL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_REPO_URL } }
+                - name: GIT_USER_NAME
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_NAME } }
+                - name: GIT_USER_EMAIL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_EMAIL } }
+                - name: CLAUDE_MODEL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MODEL } }
+                - name: CLAUDE_MAX_TURNS
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MAX_TURNS } }
+              volumeMounts:
+                - { name: scripts,  mountPath: /scripts,  readOnly: true }
+                - { name: prompts,  mountPath: /prompts,  readOnly: true }
+                - { name: git-ssh,  mountPath: /secrets/git-ssh, readOnly: true }
+                - { name: home,     mountPath: /root }
+                - { name: output,   mountPath: /output }
+              resources:
+                requests: { cpu: "500m", memory: "1Gi" }
+                limits:   { cpu: "2",    memory: "2Gi" }
+          volumes:
+            - name: scripts
+              configMap:
+                name: claude-worker-config
+                items: [{ key: run.sh, path: run.sh, mode: 0755 }]
+            - name: prompts
+              configMap:
+                name: claude-worker-config
+                items:
+                  - { key: morning.md, path: morning.md }
+                  - { key: midday.md,  path: midday.md  }
+                  - { key: evening.md, path: evening.md }
+            - name: git-ssh
+              secret:
+                secretName: git-ssh
+                defaultMode: 0600
+            - name: home
+              emptyDir: {}
+            - name: output
+              nfs:
+                server: 192.168.4.27
+                path: /mnt/nfs/shared
+---
+# 1pm ET (17:00 UTC during EDT)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-midday
+  namespace: claude-worker
+spec:
+  schedule: "0 17 * * 1-5"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: claude-worker, timeslot: midday }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: claude
+              image: node:22-slim
+              command: ["/bin/bash", "/scripts/run.sh"]
+              env:
+                - { name: TIMESLOT,    value: "midday" }
+                - { name: HOME,        value: "/root" }
+                - { name: IS_SANDBOX,  value: "1" }
+                - name: ANTHROPIC_API_KEY
+                  valueFrom: { secretKeyRef: { name: anthropic-api, key: api-key } }
+                - name: GIT_REPO_URL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_REPO_URL } }
+                - name: GIT_USER_NAME
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_NAME } }
+                - name: GIT_USER_EMAIL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_EMAIL } }
+                - name: CLAUDE_MODEL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MODEL } }
+                - name: CLAUDE_MAX_TURNS
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MAX_TURNS } }
+              volumeMounts:
+                - { name: scripts,  mountPath: /scripts,  readOnly: true }
+                - { name: prompts,  mountPath: /prompts,  readOnly: true }
+                - { name: git-ssh,  mountPath: /secrets/git-ssh, readOnly: true }
+                - { name: home,     mountPath: /root }
+                - { name: output,   mountPath: /output }
+              resources:
+                requests: { cpu: "500m", memory: "1Gi" }
+                limits:   { cpu: "2",    memory: "2Gi" }
+          volumes:
+            - name: scripts
+              configMap:
+                name: claude-worker-config
+                items: [{ key: run.sh, path: run.sh, mode: 0755 }]
+            - name: prompts
+              configMap:
+                name: claude-worker-config
+                items:
+                  - { key: morning.md, path: morning.md }
+                  - { key: midday.md,  path: midday.md  }
+                  - { key: evening.md, path: evening.md }
+            - name: git-ssh
+              secret:
+                secretName: git-ssh
+                defaultMode: 0600
+            - name: home
+              emptyDir: {}
+            - name: output
+              nfs:
+                server: 192.168.4.27
+                path: /mnt/nfs/shared
+---
+# 5pm ET (21:00 UTC during EDT)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-evening
+  namespace: claude-worker
+spec:
+  schedule: "0 21 * * 1-5"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: claude-worker, timeslot: evening }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: claude
+              image: node:22-slim
+              command: ["/bin/bash", "/scripts/run.sh"]
+              env:
+                - { name: TIMESLOT,    value: "evening" }
+                - { name: HOME,        value: "/root" }
+                - { name: IS_SANDBOX,  value: "1" }
+                - name: ANTHROPIC_API_KEY
+                  valueFrom: { secretKeyRef: { name: anthropic-api, key: api-key } }
+                - name: GIT_REPO_URL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_REPO_URL } }
+                - name: GIT_USER_NAME
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_NAME } }
+                - name: GIT_USER_EMAIL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_EMAIL } }
+                - name: CLAUDE_MODEL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MODEL } }
+                - name: CLAUDE_MAX_TURNS
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MAX_TURNS } }
+              volumeMounts:
+                - { name: scripts,  mountPath: /scripts,  readOnly: true }
+                - { name: prompts,  mountPath: /prompts,  readOnly: true }
+                - { name: git-ssh,  mountPath: /secrets/git-ssh, readOnly: true }
+                - { name: home,     mountPath: /root }
+                - { name: output,   mountPath: /output }
+              resources:
+                requests: { cpu: "500m", memory: "1Gi" }
+                limits:   { cpu: "2",    memory: "2Gi" }
+          volumes:
+            - name: scripts
+              configMap:
+                name: claude-worker-config
+                items: [{ key: run.sh, path: run.sh, mode: 0755 }]
+            - name: prompts
+              configMap:
+                name: claude-worker-config
+                items:
+                  - { key: morning.md, path: morning.md }
+                  - { key: midday.md,  path: midday.md  }
+                  - { key: evening.md, path: evening.md }
+            - name: git-ssh
+              secret:
+                secretName: git-ssh
+                defaultMode: 0600
+            - name: home
+              emptyDir: {}
+            - name: output
+              nfs:
+                server: 192.168.4.27
+                path: /mnt/nfs/shared

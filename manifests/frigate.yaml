@@ -1,0 +1,158 @@
+---
+# Frigate — NVR with AI object detection.
+#
+# REQUIRES (in this order of importance):
+#   1. RTSP camera(s). Cheap ones: Reolink RLC-510A, Amcrest ASH21-W, Tapo C200.
+#   2. A Google Coral USB Accelerator (~$60). Without it, CPU detection on
+#      Pi 5 caps at ~5fps for 1 camera and burns a full core. With it: 6+
+#      cameras at <10ms inference.
+#   3. Storage. Recordings eat ~10GB/camera/day at 1080p; mount NFS-backed
+#      PVC if you want >a week of retention.
+#
+# Add the Coral device to a node, then this manifest pins Frigate to that
+# node + mounts /dev/bus/usb so the Coral is visible inside the pod:
+#   nodeSelector: { hardware/coral: "true" }
+#   ssh victord@rpi-node2 'sudo lsusb | grep -i google'  # confirm visible
+#   kubectl label node rpi-node2 hardware/coral=true
+#
+# This manifest ships with NO cameras configured — once cameras exist, edit
+# the ConfigMap to add them under the `cameras:` block. See frigate.video/docs.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: frigate
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frigate-config
+  namespace: frigate
+data:
+  config.yml: |
+    mqtt:
+      enabled: false   # flip to true + point at Home Assistant's mosquitto
+    detectors:
+      # Once Coral is in: uncomment the edgetpu block and delete cpu.
+      cpu:
+        type: cpu
+      # edgetpu:
+      #   type: edgetpu
+      #   device: usb
+    record:
+      enabled: true
+      retain:
+        days: 7
+        mode: motion
+    snapshots:
+      enabled: true
+      retain:
+        default: 14
+    cameras: {}   # <-- ADD CAMERAS HERE, e.g.:
+      # frontdoor:
+      #   ffmpeg:
+      #     inputs:
+      #       - path: rtsp://user:pass@192.168.4.50:554/cam/realmonitor?channel=1&subtype=0
+      #         roles: [detect, record]
+      #   detect:
+      #     width: 1280
+      #     height: 720
+      #     fps: 5
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: frigate-config-pvc
+  namespace: frigate
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources: { requests: { storage: 2Gi } }
+---
+# Recordings live on NFS — big, append-mostly, fine on rpi-control's SSD.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: frigate-media
+  namespace: frigate
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: nfs-1
+  volumeName: nfs-frigate
+  resources: { requests: { storage: 200Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frigate
+  namespace: frigate
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: frigate }
+  template:
+    metadata:
+      labels: { app: frigate }
+    spec:
+      # nodeSelector: { hardware/coral: "true" }   # once Coral is attached
+      containers:
+        - name: frigate
+          image: ghcr.io/blakeblackshear/frigate:stable
+          securityContext:
+            privileged: true     # needed for /dev/bus/usb passthrough (Coral)
+          env:
+            - { name: FRIGATE_RTSP_PASSWORD, value: change_me }
+          ports:
+            - { name: web,  containerPort: 5000 }
+            - { name: rtsp, containerPort: 8554 }
+          volumeMounts:
+            - { name: config,    mountPath: /config/config.yml, subPath: config.yml }
+            - { name: configpvc, mountPath: /config }
+            - { name: media,     mountPath: /media/frigate }
+            - { name: dev-bus-usb, mountPath: /dev/bus/usb }
+            - { name: shm, mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "200m", memory: "512Mi" }
+            limits:   { cpu: "4",    memory: "2Gi" }
+      volumes:
+        - { name: config,    configMap: { name: frigate-config } }
+        - name: configpvc
+          persistentVolumeClaim: { claimName: frigate-config-pvc }
+        - name: media
+          persistentVolumeClaim: { claimName: frigate-media }
+        - { name: dev-bus-usb, hostPath: { path: /dev/bus/usb } }
+        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 256Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frigate
+  namespace: frigate
+spec:
+  selector: { app: frigate }
+  ports:
+    - { port: 80, targetPort: 5000 }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frigate
+  namespace: frigate
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+    nginx.ingress.kubernetes.io/auth-url: "http://authelia.auth.svc.cluster.local/api/verify"
+    nginx.ingress.kubernetes.io/auth-signin: "https://auth.192.168.4.27.nip.io"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [frigate.192.168.4.27.nip.io]
+      secretName: frigate-tls
+  rules:
+    - host: frigate.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: frigate, port: { number: 80 } }

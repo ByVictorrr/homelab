@@ -1,0 +1,87 @@
+---
+# Standalone buildkitd Pod, shared by all GitHub Actions runners.
+# Runners set BUILDKIT_HOST=tcp://buildkitd.buildkit.svc.cluster.local:1234
+# in their workflows; `docker buildx build` (or `buildctl`) talks to it
+# directly. The cache PVC means incremental builds reuse layers across
+# runs — first build is slow, subsequent builds are 30-60s.
+#
+# Notes:
+#  - Runs rootless (no privileged container).
+#  - Single replica intentionally — buildkit's cache isn't designed for
+#    multi-writer. If you outgrow one, run separate buildkitds per repo.
+#  - PVC on Longhorn so the cache survives pod reschedules.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: buildkit
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: buildkit-cache
+  namespace: buildkit
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buildkitd
+  namespace: buildkit
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # cache PVC is RWO; can't run two concurrently
+  selector: { matchLabels: { app: buildkitd } }
+  template:
+    metadata:
+      labels: { app: buildkitd }
+    spec:
+      containers:
+        - name: buildkitd
+          image: moby/buildkit:v0.16.0-rootless
+          args:
+            - --addr
+            - unix:///run/user/1000/buildkit/buildkitd.sock
+            - --addr
+            - tcp://0.0.0.0:1234
+            - --oci-worker-no-process-sandbox
+          env:
+            - name: BUILDKITD_FLAGS
+              value: --oci-worker-no-process-sandbox
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile: { type: Unconfined }
+            # rootless still wants user-ns; on Pi kernels this works out of box.
+          ports:
+            - containerPort: 1234
+          readinessProbe:
+            exec:
+              command: [buildctl, debug, workers]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits:   { cpu: "2",  memory: 4Gi }
+          volumeMounts:
+            - { name: cache, mountPath: /home/user/.local/share/buildkit }
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: buildkit-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkitd
+  namespace: buildkit
+spec:
+  selector: { app: buildkitd }
+  ports:
+    - { port: 1234, targetPort: 1234 }

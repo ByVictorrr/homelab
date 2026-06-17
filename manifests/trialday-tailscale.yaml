@@ -1,0 +1,21 @@
+---
+# Expose TrialDay on Tailscale at https://trialday.bluebuck-micro.ts.net.
+# This is the canonical URL — matches NEXT_PUBLIC_APP_URL baked into the build,
+# so Clerk redirects, Stripe checkout, email links etc. all stay coherent.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: trialday-ts
+  namespace: trialday
+  annotations:
+    tailscale.com/hostname: "trialday"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - trialday
+  defaultBackend:
+    service:
+      name: trialday
+      port:
+        number: 80

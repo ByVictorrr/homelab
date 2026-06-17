@@ -1,0 +1,132 @@
+---
+# Mealie — recipe collection, meal planner, auto-generated shopping lists.
+# Single-container app, SQLite-backed. Family-friendly UI; phones get a clean PWA.
+#
+# First-time setup:
+#   1. kubectl apply -f manifests/mealie.yaml
+#   2. Browse to http://recipes.192.168.4.27.nip.io
+#   3. Default admin: changeme@example.com / MyPassword
+#      LOG IN, then immediately:
+#        - Settings → Users → change admin's email + password
+#        - Settings → Site Settings → turn OFF "Allow Sign Ups" if it's on
+#   4. Invite family: Settings → Users → + Add User
+#      (or have them sign up via the invite token system)
+#
+# Adding recipes:
+#   - URL import: paste any recipe URL (Bon Appétit, NYT, anywhere) → Mealie parses it
+#   - Manual: + → New Recipe → type it
+#   - Bulk: Settings → Data Management → can import from Paprika, Nextcloud Cookbook, etc.
+#
+# Useful features:
+#   - Meal plan: drag recipes onto a calendar → auto-builds shopping list
+#   - Shared cookbooks: tag a recipe "Dad's", show only those on his account
+#   - Mobile PWA: install from browser, looks like a native app
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mealie
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mealie-data
+  namespace: mealie
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mealie
+  namespace: mealie
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mealie
+  template:
+    metadata:
+      labels:
+        app: mealie
+    spec:
+      containers:
+        - name: mealie
+          image: ghcr.io/mealie-recipes/mealie:v3.3.0
+          ports:
+            - containerPort: 9000
+          env:
+            - name: TZ
+              value: "America/Los_Angeles"
+            - name: ALLOW_SIGNUP
+              value: "false"
+            - name: BASE_URL
+              value: "https://recipes.192.168.4.27.nip.io"
+            - name: DB_ENGINE
+              value: "sqlite"
+            - name: MAX_WORKERS
+              value: "1"
+            - name: WEB_CONCURRENCY
+              value: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          readinessProbe:
+            httpGet:
+              path: /api/app/about
+              port: 9000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mealie-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mealie
+  namespace: mealie
+spec:
+  selector:
+    app: mealie
+  ports:
+    - port: 80
+      targetPort: 9000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mealie
+  namespace: mealie
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"   # recipe-photo uploads
+    cert-manager.io/cluster-issuer: cluster-ca
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [recipes.192.168.4.27.nip.io]
+      secretName: mealie-tls
+  rules:
+    - host: recipes.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mealie
+                port:
+                  number: 80

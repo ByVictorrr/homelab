@@ -1,0 +1,127 @@
+---
+# NFS storage — single share on rpi-control (192.168.4.27):/mnt/nfs (~900 GB usable).
+# rpi-node3's SSD was repurposed to Longhorn — see ansible/playbooks/storage.yml.
+#
+# All apps mount the same underlying disk; each PV scopes to a subdir so contents
+# stay organized. Capacities are 900Gi per PV because they all share the same
+# ~900 GB pool — NFS doesn't enforce per-PV quotas, so the first app to fill
+# the disk wins. The big numbers just let any single PVC claim the full pool.
+#
+# Subpath layout:
+#   /mnt/nfs/media       → Jellyfin (nfs-media)
+#   /mnt/nfs/audiobooks  → Audiobookshelf (nfs-audiobooks)
+#   /mnt/nfs/shared      → HTTP fileserver / family drop-zone (nfs-shared)
+#   /mnt/nfs/backups     → Longhorn backup target, DB dumps (nfs-backups)
+#   /mnt/nfs/pxe-tftp    → PXE/TFTP root (nfs-pxe)
+#   /mnt/nfs/frigate     → Frigate recordings + snapshots (nfs-frigate)
+#
+# Mac/Linux clients can mount the parent share too:
+#   nfs://192.168.4.27/mnt/nfs       (or nfs://rpi-control.local/mnt/nfs)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nfs-1
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+---
+# nfs-root → the entire share root, so the HTTP file server (or any app that
+# wants a browsable view of every subdir) sees media/, audiobooks/, shared/,
+# backups/, pxe-tftp/ all at once.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-root
+spec:
+  capacity: { storage: 900Gi }
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-1
+  mountOptions: [hard, nfsvers=4.1, rsize=1048576, wsize=1048576]
+  nfs:
+    server: 192.168.4.27
+    path: /mnt/nfs
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-media
+spec:
+  capacity: { storage: 900Gi }
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-1
+  mountOptions: [hard, nfsvers=4.1, rsize=1048576, wsize=1048576]
+  nfs:
+    server: 192.168.4.27
+    path: /mnt/nfs/media
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-audiobooks
+spec:
+  capacity: { storage: 900Gi }
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-1
+  mountOptions: [hard, nfsvers=4.1, rsize=1048576, wsize=1048576]
+  nfs:
+    server: 192.168.4.27
+    path: /mnt/nfs/audiobooks
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-shared
+spec:
+  capacity: { storage: 900Gi }
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-1
+  mountOptions: [hard, nfsvers=4.1, rsize=1048576, wsize=1048576]
+  nfs:
+    server: 192.168.4.27
+    path: /mnt/nfs/shared
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-backups
+spec:
+  capacity: { storage: 900Gi }
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-1
+  mountOptions: [hard, nfsvers=4.1, rsize=1048576, wsize=1048576]
+  nfs:
+    server: 192.168.4.27
+    path: /mnt/nfs/backups
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-pxe
+spec:
+  capacity: { storage: 10Gi }
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-1
+  mountOptions: [hard, nfsvers=4.1, rsize=1048576, wsize=1048576]
+  nfs:
+    server: 192.168.4.27
+    path: /mnt/nfs/pxe-tftp
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-frigate
+spec:
+  capacity: { storage: 900Gi }
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-1
+  mountOptions: [hard, nfsvers=4.1, rsize=1048576, wsize=1048576]
+  nfs:
+    server: 192.168.4.27
+    path: /mnt/nfs/frigate

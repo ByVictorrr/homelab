@@ -1,0 +1,116 @@
+---
+# TrialDay — Next.js 15 app deployed onto the cluster.
+#
+# Source: ~/git/worksim (GitHub: ByVictorrr/worksim)
+# Stack:  Next.js 15 + Clerk (cloud) + Supabase (cloud) + Anthropic + Stripe + Resend
+#
+# Image lives in the in-cluster registry at registry.bluebuck-micro.ts.net/trialday:latest.
+# Re-build + push from the laptop:
+#   sudo HOME=$HOME docker buildx build --platform linux/arm64 \
+#     --build-arg NEXT_PUBLIC_APP_URL=https://trialday.bluebuck-micro.ts.net \
+#     ... (other NEXT_PUBLIC_* build args from .env.local) \
+#     -t registry.bluebuck-micro.ts.net/trialday:latest \
+#     --push ~/git/worksim
+#
+# Secret `trialday-env` holds the runtime env (all the *_API_KEY, *_SECRET etc).
+# Populate it with:
+#   kubectl -n trialday create secret generic trialday-env --from-env-file=~/git/worksim/.env.local \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl -n trialday set env deploy/trialday NEXT_PUBLIC_APP_URL=https://trialday.bluebuck-micro.ts.net
+#
+# After a code change:
+#   1. Rebuild + push the image (above)
+#   2. kubectl -n trialday rollout restart deploy/trialday
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trialday
+---
+# NOTE: The `trialday-env` Secret is intentionally NOT in this manifest.
+# It's created out-of-band from ~/git/worksim/.env.local so that
+# `kubectl apply -f manifests/trialday.yaml` won't clobber real keys:
+#   kubectl -n trialday create secret generic trialday-env \
+#     --from-env-file=~/git/worksim/.env.local \
+#     --dry-run=client -o yaml | kubectl apply -f -
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trialday
+  namespace: trialday
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app: trialday }
+  template:
+    metadata:
+      labels: { app: trialday }
+    spec:
+      containers:
+        - name: trialday
+          image: 192.168.4.27:5000/trialday:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - secretRef:
+                name: trialday-env
+          env:
+            # The cluster URL overrides whatever's in .env.local.
+            - { name: NEXT_PUBLIC_APP_URL, value: "https://trialday.bluebuck-micro.ts.net" }
+            - { name: NODE_ENV,            value: "production" }
+            - { name: PORT,                value: "3000" }
+            - { name: HOSTNAME,            value: "0.0.0.0" }
+          readinessProbe:
+            httpGet: { path: /, port: 3000 }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 10
+          livenessProbe:
+            httpGet: { path: /, port: 3000 }
+            initialDelaySeconds: 90
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "200m", memory: "512Mi" }
+            limits:   { cpu: "2",    memory: "2Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trialday
+  namespace: trialday
+spec:
+  selector: { app: trialday }
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: trialday
+  namespace: trialday
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    cert-manager.io/cluster-issuer: cluster-ca
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [trialday.192.168.4.27.nip.io]
+      secretName: trialday-tls
+  rules:
+    - host: trialday.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: trialday
+                port:
+                  number: 80

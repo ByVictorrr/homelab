@@ -1,0 +1,22 @@
+---
+# Expose AdGuard Home admin UI over Tailscale at https://adguard.bluebuck-micro.ts.net.
+# Note: this only exposes the WEB UI (port 80). The DNS service on port 53 is
+# separate (adguard-dns LoadBalancer) and continues to serve your LAN directly.
+# Prereq: Tailscale operator installed (see PROGRESS.md).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: adguard-ts
+  namespace: adguard
+  annotations:
+    tailscale.com/hostname: "adguard"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - adguard
+  defaultBackend:
+    service:
+      name: adguard-web
+      port:
+        number: 80

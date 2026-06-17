@@ -1,0 +1,21 @@
+---
+# Expose Vaultwarden over Tailscale at https://vault.bluebuck-micro.ts.net.
+# Required for WebAuthn / passkeys, which the LAN HTTP URL can't do.
+# Prereq: Tailscale operator installed (see PROGRESS.md).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vaultwarden-ts
+  namespace: vaultwarden
+  annotations:
+    tailscale.com/hostname: "vault"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - vault
+  defaultBackend:
+    service:
+      name: vaultwarden
+      port:
+        number: 80

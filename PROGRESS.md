@@ -210,11 +210,14 @@ Single source of truth. LAN URLs only work on home Wi-Fi; Tailscale URLs work an
 | **Registry** (internal) | http://192.168.4.27:5000 | https://registry.bluebuck-micro.ts.net | No auth, HTTP on LAN. Each Pi trusts it via `/etc/rancher/k3s/registries.yaml` (set up by `ansible/playbooks/registries.yml`). |
 | **TrialDay** (Next.js, in progress) | http://trialday.192.168.4.27.nip.io | https://trialday.bluebuck-micro.ts.net | Clerk (cloud) |
 | **HTTP file server** | http://files.192.168.4.27.nip.io | https://files.bluebuck-micro.ts.net | Open — anything you drop in `/mnt/nfs/shared` is publicly listable. |
+| **Forgejo (Git)** | http://git.192.168.4.27.nip.io | — (add `git-ts` Ingress to expose on tailnet) | First signup wins admin. SSH on NodePort 30022 (`git clone git@<any-node-ip>:30022/user/repo.git`). |
+| **JupyterLab** | http://jupyter.192.168.4.27.nip.io | — (add `jupyter-ts` Ingress) | Token in `jupyter-token` Secret. Scipy-notebook image (numpy/scipy/matplotlib/pandas pre-installed). 40 Gi work PVC on Longhorn. |
+| **kerneldev** (SSH only) | `ssh -p 30024 root@192.168.4.27` | — | Long-running pod for kernel module dev + QEMU + CLion remote toolchain. Push your pubkey on first use. `/root/shared` is the cluster NFS drop-zone. |
 | **PXE boot (proxyDHCP + TFTP)** | host-network only on rpi-control | — | Boots netboot.xyz menu for any x86 PC on the LAN. |
 | Glances API (per-Pi sensors) | http://192.168.4.{27,91,94,95}:61208 | — | Open (LAN-only by hostNetwork) |
 | Ollama API (LLM backend) | (in-cluster `ollama.ollama.svc.cluster.local:11434`) | — | Open within cluster |
 
-Not deployed yet (manifests written): Immich (`photos.*`), Sandbox (`kubectl exec` only).
+Not deployed yet (manifests written): Immich (`photos.*`), Sandbox (`kubectl exec` only), Anki sync (`anki.*` — needs password), Authelia SSO (`auth.*` — needs argon2 hash + 3 random secrets), Frigate NVR (`frigate.*` — needs cameras + Coral USB).
 
 ## Building + deploying your own apps (TrialDay example)
 

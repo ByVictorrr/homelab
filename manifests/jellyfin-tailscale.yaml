@@ -1,0 +1,22 @@
+---
+# Expose Jellyfin over Tailscale at https://jellyfin.bluebuck-micro.ts.net.
+# Streaming works fine over Tailscale's WireGuard mesh; quality is bounded
+# by your upload bandwidth at home.
+# Prereq: Tailscale operator installed (see PROGRESS.md).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jellyfin-ts
+  namespace: jellyfin
+  annotations:
+    tailscale.com/hostname: "jellyfin"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - jellyfin
+  defaultBackend:
+    service:
+      name: jellyfin
+      port:
+        number: 80

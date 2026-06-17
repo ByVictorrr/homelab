@@ -1,0 +1,42 @@
+---
+# Minimal GitHub Actions self-hosted runners on k3s.
+#
+# One-time install (run all 3 in order):
+#
+#   helm install arc \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
+#     --namespace arc-systems --create-namespace --version 0.12.1
+#
+#   kubectl apply -f manifests/actions-runner-controller.yaml
+#
+#   kubectl -n arc-runners create secret generic github-pat \
+#     --from-literal=github_token='github_pat_REPLACE_ME' \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+#   helm install rpi-runners \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+#     --namespace arc-runners --version 0.12.1 \
+#     --set githubConfigUrl=https://github.com/ByVictorrr/REPO \
+#     --set githubConfigSecret=github-pat \
+#     --set runnerScaleSetName=rpi-arm64 \
+#     --set minRunners=0 --set maxRunners=2
+#
+# PAT scopes (fine-grained, per repo): Administration R/W + Metadata Read.
+#
+# Use in a workflow:
+#   jobs:
+#     hello:
+#       runs-on: rpi-arm64        # ← matches runnerScaleSetName above
+#       steps:
+#         - uses: actions/checkout@v4
+#         - run: uname -a && echo "running in a Pi pod"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: arc-systems
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: arc-runners

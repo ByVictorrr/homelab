@@ -1,0 +1,290 @@
+---
+# Homepage — a single landing page for the whole homelab. Lists every app
+# with a clickable card, status, and optional widget (CPU/mem/etc).
+# Configured via YAML in /app/config, mounted from a ConfigMap below so the
+# config is editable via `kubectl edit configmap`.
+#
+# First-time setup:
+#   1. kubectl a → the dashboard you'll bookmark on every device.
+#   3. Edit the apps list:
+#        kubectl -n homepage edit configmap homepage-config
+#      Add/remove app cards in services.yaml. Pod auto-reloads.
+#
+# Tip: bookmark this URL on every family phone / laptop. One link → all apps.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: homepage
+---
+# RBAC: lets Homepage read pod/service status from the cluster
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: homepage
+  namespace: homepage
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: homepage
+rules:
+  - apiGroups: [""]
+    resources: [namespaces, pods, nodes, services]
+    verbs: [get, list]
+  - apiGroups: ["apps"]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [get, list]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [ingresses]
+    verbs: [get, list]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: [pods, nodes]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: homepage
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: homepage
+subjects:
+  - kind: ServiceAccount
+    name: homepage
+    namespace: homepage
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: homepage-config
+  namespace: homepage
+data:
+  settings.yaml: |
+    title: rpi-cluster
+    theme: dark
+    color: slate
+    headerStyle: clean
+    statusStyle: dot
+    layout:
+      Core:
+        style: row
+        columns: 4
+      Family:
+        style: row
+        columns: 4
+      Admin:
+        style: row
+        columns: 4
+
+  bookmarks.yaml: |
+    - Docs:
+        - PROGRESS:
+            - abbr: PG
+              href: https://github.com
+
+  services.yaml: |
+    - Family:
+        - Chat (AI):
+            href: https://chat.bluebuck-micro.ts.net
+            description: Open WebUI — Claude/GPT/Llama via OpenRouter, plus local Ollama
+            icon: open-webui.png
+        - Nextcloud:
+            href: https://cloud.bluebuck-micro.ts.net
+            description: Files, photos, calendar, contacts
+            icon: nextcloud.png
+        - Recipes (Mealie):
+            href: https://recipes.bluebuck-micro.ts.net
+            description: Family recipe book + meal planner
+            icon: mealie.png
+        - Audiobooks:
+            href: https://audiobooks.bluebuck-micro.ts.net
+            description: Audiobook + podcast server
+            icon: audiobookshelf.png
+        - Jellyfin (Media):
+            href: https://jellyfin.bluebuck-micro.ts.net
+            description: Movies, TV, music
+            icon: jellyfin.png
+        - Home Assistant:
+            href: https://homeassistant.bluebuck-micro.ts.net
+            description: Smart home dashboard
+            icon: home-assistant.png
+
+    - Core:
+        - Vaultwarden (Passwords):
+            href: https://vault.bluebuck-micro.ts.net
+            description: Self-hosted Bitwarden
+            icon: vaultwarden.png
+        - AdGuard:
+            href: https://adguard.bluebuck-micro.ts.net
+            description: LAN ad blocker + DNS
+            icon: adguard-home.png
+        - Files:
+            href: https://files.bluebuck-micro.ts.net
+            description: HTTP file share — drop-zone for the family
+            icon: nginx.png
+
+    - Admin:
+        - Rancher:
+            href: https://rancher.bluebuck-micro.ts.net
+            description: Kubernetes cluster UI
+            icon: rancher.png
+        - Uptime Kuma:
+            href: https://uptime.bluebuck-micro.ts.net
+            description: Service monitoring + alerts
+            icon: uptime-kuma.png
+        - Longhorn:
+            href: https://longhorn.bluebuck-micro.ts.net
+            description: Distributed block storage admin
+            icon: longhorn.png
+        - Registry:
+            href: https://registry.bluebuck-micro.ts.net
+            description: Internal container registry
+            icon: docker.png
+        - TrialDay:
+            href: https://trialday.bluebuck-micro.ts.net
+            description: Next.js app — Clerk auth, in progress
+            icon: nextjs.png
+        - Forgejo (Git):
+            href: http://git.192.168.4.27.nip.io
+            description: Self-hosted Git — repos, issues, CI (Forgejo Actions)
+            icon: forgejo.png
+        - JupyterLab:
+            href: http://jupyter.192.168.4.27.nip.io
+            description: Notebooks for numerical methods / signal processing / labs
+            icon: jupyter.png
+        - Sandbox (Ubuntu shell):
+            href: https://home.192.168.4.27.nip.io
+            description: "kubectl -n sandbox exec -it deploy/sandbox -- bash  →  verilator, ghdl, ngspice, octave, RISC-V cross"
+            icon: ubuntu.png
+        - Kerneldev (SSH target):
+            href: https://home.192.168.4.27.nip.io
+            description: "ssh -p 30024 root@192.168.4.27 (after ssh-copy-id)  →  QEMU + gdb-multiarch for kernel modules"
+            icon: linux.png
+
+  widgets.yaml: |
+    - resources:
+        backend: kubernetes
+        expanded: true
+        cpu: true
+        memory: true
+    - kubernetes:
+        cluster:
+          show: true
+          cpu: true
+          memory: true
+          showLabel: true
+          label: "rpi-cluster"
+        nodes:
+          show: true
+          cpu: true
+          memory: true
+          showLabel: true
+
+  kubernetes.yaml: |
+    mode: cluster
+
+  docker.yaml: |
+    # not used — Kubernetes mode
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: homepage
+  namespace: homepage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: homepage
+  template:
+    metadata:
+      labels:
+        app: homepage
+    spec:
+      serviceAccountName: homepage
+      initContainers:
+        # Seed a writable /app/config from the read-only ConfigMap + the image's
+        # skeleton (custom.css / custom.js etc). Needed because homepage v0.x+
+        # writes to /app/config at startup, but ConfigMap volumes are read-only.
+        - name: init-config
+          image: ghcr.io/gethomepage/homepage:latest
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              cp -L /tmp/config-ro/*.yaml /app/config/
+              for f in /app/src/skeleton/*; do
+                name=$(basename "$f")
+                [ -e "/app/config/$name" ] || cp -L "$f" "/app/config/$name"
+              done
+              ls -la /app/config
+          volumeMounts:
+            - { name: config-ro, mountPath: /tmp/config-ro }
+            - { name: config,    mountPath: /app/config }
+      containers:
+        - name: homepage
+          image: ghcr.io/gethomepage/homepage:latest
+          ports:
+            - containerPort: 3000
+          env:
+            - name: HOMEPAGE_ALLOWED_HOSTS
+              value: "home.192.168.4.27.nip.io,home.bluebuck-micro.ts.net"
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+            - name: logs
+              mountPath: /app/config/logs
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      volumes:
+        - name: config-ro
+          configMap:
+            name: homepage-config
+        - name: config
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: homepage
+  namespace: homepage
+spec:
+  selector:
+    app: homepage
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: homepage
+  namespace: homepage
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+    nginx.ingress.kubernetes.io/auth-url: "http://authelia.auth.svc.cluster.local/api/verify"
+    nginx.ingress.kubernetes.io/auth-signin: "https://auth.192.168.4.27.nip.io"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [home.192.168.4.27.nip.io]
+      secretName: homepage-tls
+  rules:
+    - host: home.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: homepage
+                port:
+                  number: 80

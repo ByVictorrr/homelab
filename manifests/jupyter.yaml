@@ -1,0 +1,134 @@
+---
+# JupyterLab — single-user (no JupyterHub overhead). For numerical methods,
+# signal processing, data analysis, plotting — anything you'd reach for a
+# notebook for in EE/CompE coursework.
+#
+# Notebooks + data live in /home/jovyan/work (PVC, persists across pod
+# restarts). Tools you `pip install` from a cell go in /home/jovyan/.local
+# (also on the PVC) so they persist too.
+#
+# To use:
+#   kubectl apply -f manifests/jupyter.yaml
+#   # Get the access token:
+#   kubectl -n jupyter logs deploy/jupyter | grep 'token='
+#   # Browse http://jupyter.192.168.4.27.nip.io/?token=...
+#
+# Custom kernels worth adding (run from a notebook cell as ! commands):
+#   # Octave (MATLAB-equivalent for labs):
+#   !pip install --user octave_kernel
+#   !apt-get update && apt-get install -y octave  # already root via base image
+#   # C++ (xeus-cling, slow on Pi but works for small examples):
+#   !mamba install -y -c conda-forge xeus-cling
+#   # SystemVerilog/Verilog via Verilator:  use a !verilator shell from cells.
+#
+# The image is jupyter/scipy-notebook (~2GB, arm64) — already has numpy,
+# scipy, matplotlib, pandas, sympy, scikit-learn. First pod start takes
+# ~5 min while it pulls.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jupyter
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jupyter-work
+  namespace: jupyter
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 40Gi
+---
+# Token in a Secret so it's not in the manifest in clear-text. Change before applying.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jupyter-token
+  namespace: jupyter
+type: Opaque
+stringData:
+  token: d7013d62bab622aea8d80dd5a2557de2cd639634743b7841d1e2171223821f73
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jupyter
+  namespace: jupyter
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: jupyter }
+  template:
+    metadata:
+      labels: { app: jupyter }
+    spec:
+      # Kubernetes injects <SVC>_PORT=tcp://... env vars for every Service in
+      # the namespace. The `jupyter` Service collides with Jupyter's own
+      # JUPYTER_PORT trait and crashes the app with a ValueError. Disable
+      # the injection — pods can still talk to Services via DNS.
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000   # jovyan
+        fsGroup: 100
+      containers:
+        - name: jupyter
+          image: quay.io/jupyter/scipy-notebook:latest
+          args:
+            - start-notebook.sh
+            - --ServerApp.base_url=/
+            - --ServerApp.allow_origin=*
+            - --ServerApp.ip=0.0.0.0
+            - --ServerApp.token=$(JUPYTER_TOKEN)
+            - --ServerApp.password=
+          env:
+            - name: JUPYTER_TOKEN
+              valueFrom:
+                secretKeyRef: { name: jupyter-token, key: token }
+          ports:
+            - { containerPort: 8888 }
+          volumeMounts:
+            - { name: work, mountPath: /home/jovyan/work }
+          resources:
+            requests: { cpu: "200m", memory: "1Gi" }
+            limits:   { cpu: "4",    memory: "4Gi" }
+      volumes:
+        - name: work
+          persistentVolumeClaim:
+            claimName: jupyter-work
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jupyter
+  namespace: jupyter
+spec:
+  selector: { app: jupyter }
+  ports:
+    - { port: 80, targetPort: 8888 }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jupyter
+  namespace: jupyter
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"   # long-lived websockets
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    cert-manager.io/cluster-issuer: cluster-ca
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [jupyter.192.168.4.27.nip.io]
+      secretName: jupyter-tls
+  rules:
+    - host: jupyter.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: jupyter, port: { number: 80 } }
