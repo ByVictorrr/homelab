@@ -1,0 +1,41 @@
+# Immich Helm values for chart immich-0.12.0 (app v2.6.3).
+#
+# Chart 0.12 switched to the bjw-s common library: env vars must live under
+# controllers.main.containers.main.env. The pre-0.12 flat top-level `env:`
+# map is silently ignored, so DB_HOSTNAME defaults to "database" and Redis
+# defaults to "<release>-valkey" — both break against the external Postgres
+# + Redis we deploy in immich.yaml. (Past incident: server CrashLoopBackOff
+# with `getaddrinfo ENOTFOUND database`.)
+controllers:
+  main:
+    containers:
+      main:
+        env:
+          REDIS_HOSTNAME: immich-redis
+          IMMICH_MACHINE_LEARNING_URL: http://immich-machine-learning:3003
+          DB_HOSTNAME: immich-postgres
+          DB_DATABASE_NAME: immich
+          DB_USERNAME: immich
+          DB_PASSWORD:
+            valueFrom:
+              secretKeyRef:
+                name: immich-postgres
+                key: password
+
+immich:
+  persistence:
+    library:
+      existingClaim: immich-library
+
+server:
+  ingress:
+    main:
+      enabled: true
+      className: nginx
+      annotations:
+        nginx.ingress.kubernetes.io/proxy-body-size: 500m
+      hosts:
+        - host: photos.192.168.4.27.nip.io
+          paths:
+            - path: /
+              pathType: Prefix

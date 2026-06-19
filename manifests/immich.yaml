@@ -1,72 +1,176 @@
 ---
-# Immich — self-hosted Google Photos replacement. Auto phone backup, AI face
-# / object search, shared albums.
+# Immich — self-hosted photo + video library (Google Photos replacement).
+# Auto phone backup, ML face/object search, shared albums.
 #
-# Immich is multi-container (server + microservices + ML + postgres-with-pgvector
-# + redis) and ships breaking changes often, so a from-scratch manifest in this
-# repo would rot. Recommended path is the official Helm chart, which the project
-# maintains alongside the app code.
+# Architecture: Immich app (server + microservices + machine-learning) runs
+# via the official Helm chart. The chart deprecated its internal Postgres +
+# Redis subcharts as of v0.10, so we deploy those externally here as raw
+# manifests. Postgres uses Immich's official image (pgvector + vectorchord
+# extensions baked in — required for face/object embedding search).
 #
-# This file is split: namespace + DB password stub are committed here, and the
-# install command lives in the header below. Run it once; upgrades are
-# `helm upgrade ... --reuse-values`.
-#
-# First-time setup:
-#   1. Set a DB password (or just kubectl apply this file, then run the create
-#      secret command below — both work, same result):
+# First-time install:
+#   1. Apply this file (creates ns, secret skeleton, postgres + redis):
 #        kubectl apply -f manifests/immich.yaml
+#
+#   2. Replace the Secret's placeholder DB password with a random one:
 #        kubectl -n immich create secret generic immich-postgres \
 #          --from-literal=password="$(openssl rand -base64 24)" \
 #          --dry-run=client -o yaml | kubectl apply -f -
+#      (keep this password — Immich's app will use it to talk to postgres.)
 #
-#   2. Install Immich via the official chart:
+#   3. Install Immich via Helm. Pin the chart version — 0.12 introduced the
+#      bjw-s common library and the values schema is not compatible with
+#      pre-0.12 flat `env:` configs:
 #        helm repo add immich https://immich-app.github.io/immich-charts
 #        helm repo update
+#        helm install immich immich/immich -n immich --version 0.12.0 \
+#          -f manifests/immich-values.yaml --wait --timeout 15m
+#      Upgrade in place with the same command swapping `install` -> `upgrade`.
 #
-#        helm install immich immich/immich \
-#          --namespace immich \
-#          --set image.tag=release \
-#          --set immich.persistence.library.size=50Gi \
-#          --set postgresql.enabled=true \
-#          --set postgresql.global.postgresql.auth.existingSecret=immich-postgres \
-#          --set postgresql.global.postgresql.auth.secretKeys.adminPasswordKey=password \
-#          --set postgresql.global.postgresql.auth.secretKeys.userPasswordKey=password \
-#          --set redis.enabled=true \
-#          --set server.ingress.main.enabled=true \
-#          --set server.ingress.main.hosts[0].host=photos.192.168.4.27.nip.io \
-#          --set 'server.ingress.main.hosts[0].paths[0].path=/' \
-#          --set server.ingress.main.className=nginx
-#
-#   3. Wait for pods (image pulls are big, can take 10+ min on Pi over Wi-Fi):
+#   4. Wait for pods (~10 min on Pi 5 for first image pulls):
 #        kubectl -n immich get pods -w
 #
-#   4. Browse to http://photos.192.168.4.27.nip.io
-#      - Create the admin account.
-#      - On phones: install the "Immich" app, point it at the URL, enable backup.
+#   5. Browse to http://photos.192.168.4.27.nip.io
+#      First account created = admin. On phones install the Immich app,
+#      point at the URL, enable backup.
 #
-# Resource reality on Pi 5 8GB:
-#   - Server + microservices: ~500MB
-#   - postgres-with-pgvector: ~300MB
-#   - redis: ~50MB
-#   - immich-machine-learning: ~1.5GB resident when ML models load
-#   Total ~2.5GB. Fine. ML jobs (face detection on first import) are CPU-heavy
-#   and slow on arm; let them run overnight after a big phone backup.
-#
-# Useful settings post-install:
-#   - Admin → Settings → Machine Learning: pick smaller models if perf is bad.
-#   - Admin → Settings → External Library: point at a path on your media drive
-#     if you want Immich to index existing photos without re-uploading.
+# Resource budget on Pi 5 8GB:
+#   - immich-server + microservices    ~600MB
+#   - immich-machine-learning          ~1.5GB resident when models load
+#   - postgres (with vectorchord)      ~300MB
+#   - redis                            ~30MB
+#   Total ~2.5GB. ML face-detection jobs are CPU-heavy and slow on arm;
+#   let them run overnight after a big phone backup.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: immich
 ---
-# Replace `password` with: kubectl create secret ... --dry-run -o yaml | kubectl apply -f -
+# The immich-postgres Secret is NOT declared here on purpose — it holds the
+# DB password and is managed out-of-band so `kubectl apply` of this manifest
+# doesn't clobber the live password. Create / rotate it via:
+#   kubectl -n immich create secret generic immich-postgres \
+#     --from-literal=password="$(openssl rand -base64 24)" \
+#     --dry-run=client -o yaml | kubectl apply -f -
+# Postgres reads POSTGRES_PASSWORD from this secret on first init. To rotate
+# later: ALTER USER immich PASSWORD '<new>' inside the running pod, then
+# patch this secret to match — Immich rereads on next pod restart.
+---
+# Library PVC — actual photo / video storage. 50 GiB on local-path; bump
+# (or migrate to Longhorn / NFS) once you start ingesting at scale.
 apiVersion: v1
-kind: Secret
+kind: PersistentVolumeClaim
+metadata:
+  name: immich-library
+  namespace: immich
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 50Gi
+---
+# === Postgres (with pgvector + vectorchord extensions) ===
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: immich-postgres-data
+  namespace: immich
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
 metadata:
   name: immich-postgres
   namespace: immich
-type: Opaque
-stringData:
-  password: "REPLACE_ME"
+spec:
+  selector:
+    app: immich-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: immich-postgres
+  namespace: immich
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      app: immich-postgres
+  template:
+    metadata:
+      labels: { app: immich-postgres }
+    spec:
+      containers:
+        - name: postgres
+          # pgvecto.rs upstream image — postgres 14 + pgvecto.rs vector
+          # extension that Immich uses for face/object embeddings. Multi-arch
+          # (arm64 supported).
+          image: tensorchord/pgvecto-rs:pg14-v0.2.0
+          env:
+            - { name: POSTGRES_USER,     value: immich }
+            - { name: POSTGRES_DB,       value: immich }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: immich-postgres, key: password } }
+            - { name: POSTGRES_INITDB_ARGS, value: "--data-checksums" }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - { containerPort: 5432, name: postgres }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "immich"]
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "2000m", memory: "1Gi" }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: immich-postgres-data }
+---
+# === Redis (queue + cache) ===
+apiVersion: v1
+kind: Service
+metadata:
+  name: immich-redis
+  namespace: immich
+spec:
+  selector:
+    app: immich-redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: immich-redis
+  namespace: immich
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: immich-redis }
+  template:
+    metadata:
+      labels: { app: immich-redis }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - { containerPort: 6379, name: redis }
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "20m",  memory: "32Mi" }
+            limits:   { cpu: "200m", memory: "128Mi" }
