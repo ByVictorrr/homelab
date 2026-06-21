@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: trialday
+spec:
+  # Headless service so the StatefulSet pod gets a stable DNS name
+  # (postgres-0.postgres.trialday.svc.cluster.local). Apps still resolve
+  # postgres.trialday.svc.cluster.local fine via the round-robin entry.
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432

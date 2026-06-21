@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trialday-migrate
+  namespace: trialday
+  annotations:
+    # Re-run on every `kubectl apply` by patching this annotation in the
+    # deploy script. Bare Jobs are immutable, so we delete+recreate.
+    trialday.app/run-id: "set-by-deploy-script"
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: migrate
+          image: ghcr.io/byvictorrr/trialday:latest
+          # If you don't have prisma/migrations/ checked in yet, switch this
+          # to `npx prisma db push --accept-data-loss` for the first deploy.
+          command: ["npx", "prisma", "migrate", "deploy"]
+          envFrom:
+            - secretRef:
+                name: trialday-env
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "768Mi"

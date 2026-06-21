@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cron-trial-reminders
+  namespace: trialday
+  labels:
+    app.kubernetes.io/component: cron
+    trialday.app/cron: trial-reminders
+spec:
+  # daily 15:00 UTC — parity with .github/workflows/cron.yml
+  schedule: "0 15 * * *"
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            trialday.app/cron: trial-reminders
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: runner
+              image: curlimages/curl:8.10.1
+              command: ["/bin/sh", "/scripts/run.sh"]
+              env:
+                - name: JOB_NAME
+                  value: trial-reminders
+                - name: TARGET
+                  value: http://trialday.trialday.svc.cluster.local/api/cron/trial-reminders
+                - name: PUSHGATEWAY
+                  value: http://pushgateway.observability.svc.cluster.local:9091
+                - name: CRON_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: trialday-env
+                      key: CRON_SECRET
+              resources:
+                requests:
+                  cpu: "20m"
+                  memory: "32Mi"
+                limits:
+                  cpu: "200m"
+                  memory: "128Mi"
+              volumeMounts:
+                - name: runner
+                  mountPath: /scripts
+          volumes:
+            - name: runner
+              configMap:
+                name: cron-runner
+                defaultMode: 0o555

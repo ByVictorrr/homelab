@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cron-runner
+  namespace: trialday
+data:
+  # Shared by every CronJob in this folder. The Job sets JOB_NAME + TARGET
+  # via env. The script measures wall time + HTTP status, prints the
+  # response body to stdout (kubectl logs picks it up), and pushes four
+  # gauges to the Pushgateway so Grafana can render last-run state.
+  run.sh: |
+    #!/bin/sh
+    set -u
+    : "${JOB_NAME:?missing JOB_NAME}"
+    : "${TARGET:?missing TARGET}"
+    : "${PUSHGATEWAY:?missing PUSHGATEWAY}"
+    : "${CRON_SECRET:?missing CRON_SECRET}"
+
+    started=$(date +%s)
+    body_file=$(mktemp)
+    http_code=$(curl --silent --show-error --output "$body_file" \
+      --write-out '%{http_code}' \
+      --max-time 600 \
+      -H "Authorization: Bearer ${CRON_SECRET}" \
+      "$TARGET") || http_code="000"
+    finished=$(date +%s)
+    duration=$((finished - started))
+
+    success=0
+    case "$http_code" in
+      2*) success=1 ;;
+    esac
+
+    # Pushgateway grouping key (job, instance) keeps each cron's gauges
+    # separate so we can graph them side by side.
+    printf '# TYPE trialday_cron_last_success gauge\ntrialday_cron_last_success %d\n# TYPE trialday_cron_last_duration_seconds gauge\ntrialday_cron_last_duration_seconds %d\n# TYPE trialday_cron_last_http_status gauge\ntrialday_cron_last_http_status %s\n# TYPE trialday_cron_last_run_timestamp_seconds gauge\ntrialday_cron_last_run_timestamp_seconds %d\n' \
+      "$success" "$duration" "$http_code" "$finished" \
+      | curl --silent --show-error --max-time 30 \
+          --data-binary @- \
+          "${PUSHGATEWAY}/metrics/job/trialday_cron/instance/${JOB_NAME}" \
+        || echo "WARN: pushgateway unreachable; metrics dropped" >&2
+
+    echo "---response body---"
+    cat "$body_file"
+    echo
+    echo "---summary---"
+    echo "job=$JOB_NAME http_code=$http_code duration_s=$duration success=$success"
+
+    [ "$success" -eq 1 ] || exit 1

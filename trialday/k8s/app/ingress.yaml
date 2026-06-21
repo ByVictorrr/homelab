@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: trialday
+  namespace: trialday
+  annotations:
+    # k3s ships with Traefik as the default ingress controller.
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    # Uncomment once cert-manager is installed and the ClusterIssuer named
+    # below exists. Without it, Traefik will still serve HTTP on entrypoint
+    # "web" (port 80) — you can add a redirect via middleware separately.
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  # tls:
+  #   - hosts:
+  #       - trialday.app
+  #     secretName: trialday-tls
+  rules:
+    - host: trialday.app
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: trialday
+                port:
+                  number: 80

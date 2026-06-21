@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: observability
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 30s
+      evaluation_interval: 30s
+      external_labels:
+        cluster: rpi
+        env: prod
+
+    scrape_configs:
+      # Cron metrics flow through Pushgateway. honor_labels keeps the
+      # job/instance labels that the runner script set on push, instead of
+      # overwriting them with "pushgateway".
+      - job_name: pushgateway
+        honor_labels: true
+        static_configs:
+          - targets: ["pushgateway.observability.svc.cluster.local:9091"]
+
+      # Prometheus self-monitoring — useful to alert if it ever stops scraping.
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]

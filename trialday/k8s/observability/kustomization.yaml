@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: observability
+
+resources:
+  - namespace.yaml
+  - pushgateway.yaml
+  - prometheus-config.yaml
+  - prometheus.yaml
+  - grafana.yaml
+
+# Bundle the Grafana dashboard JSON into a ConfigMap so it gets
+# auto-provisioned. Disable the hash suffix because the Deployment mounts
+# it by static name.
+configMapGenerator:
+  - name: grafana-dashboards
+    files:
+      - dashboards/trialday-cron.json
+
+generatorOptions:
+  disableNameSuffixHash: true

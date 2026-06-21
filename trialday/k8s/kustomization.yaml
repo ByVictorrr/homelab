@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: trialday
+
+resources:
+  - namespace.yaml
+  - postgres/statefulset.yaml
+  - postgres/service.yaml
+  - app/deployment.yaml
+  - app/service.yaml
+  - app/ingress.yaml
+  - cron/runner-script.yaml
+  - cron/cronjob-abandoned-sims.yaml
+  - cron/cronjob-recruiter-digest.yaml
+  - cron/cronjob-trial-reminders.yaml
+
+# Secrets and the migrate Job are intentionally NOT listed here.
+# - Secrets: applied separately via deploy/scripts/create-secrets.sh so we
+#   never commit real values or accidentally overwrite live credentials.
+# - Migrate Job: applied by deploy/scripts/deploy.sh per-release so the
+#   image tag is patched to the new build before the Deployment rolls.
+
+images:
+  - name: ghcr.io/byvictorrr/trialday
+    newTag: latest
