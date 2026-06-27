@@ -323,6 +323,8 @@ spec:
               python manage.py migrate
               echo "==> initdb (idempotent — groups/permissions)..."
               python manage.py initdb || true
+              echo "==> compile_themes (SCSS → CSS for /css/themes/bookwyrm-*.css)..."
+              python manage.py compile_themes
               echo "==> collectstatic..."
               python manage.py collectstatic --no-input
               echo "==> copying static into shared emptyDir..."
@@ -346,6 +348,7 @@ spec:
             - { containerPort: 8000, name: web }
           volumeMounts:
             - { name: images, mountPath: /app/images }
+            - { name: static, mountPath: /app/static, readOnly: true }   # Django reads staticfiles.json here for hashed URLs
           readinessProbe:
             tcpSocket: { port: 8000 }
             initialDelaySeconds: 30

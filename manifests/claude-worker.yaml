@@ -131,7 +131,7 @@ data:
     # The end-of-day trialday builder rebuilds from the tip of this branch.
     BRANCH="auto/main"
     WORKDIR="${HOME}/work"
-    OUTDIR="/output/claude-worker/${DATE}"
+    OUTDIR="/output/${DATE}"
     LOG_FILE="/tmp/run-${TIMESLOT}.log"
 
     # Tee all output to a log file so we can publish it to the HTTP fileserver
@@ -149,7 +149,7 @@ data:
 
     # Regenerate index.html dashboard from the file tree under /output/claude-worker.
     generate_dashboard() {
-      local root="/output/claude-worker"
+      local root="/output"
       cd "$root" 2>/dev/null || return 0
       {
         echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>claude-worker</title>'
@@ -183,7 +183,7 @@ data:
     trap 'publish_log; generate_dashboard' EXIT
 
     echo "==> [$(date -u +%H:%M:%SZ)] timeslot=${TIMESLOT} branch=${BRANCH}"
-    echo "==> log will publish to: https://files.bluebuck-micro.ts.net/shared/claude-worker/${DATE}/${TIMESLOT}-${TIME}.log"
+    echo "==> log will publish to: https://files.bluebuck-micro.ts.net/claude/worker/${DATE}/${TIMESLOT}-${TIME}.log"
 
     # --- Install git + ssh client (node:22-slim has neither) -------------
     if ! command -v git >/dev/null 2>&1; then
@@ -744,8 +744,8 @@ spec:
               emptyDir: {}
             - name: output
               nfs:
-                server: 192.168.4.27
-                path: /mnt/nfs/shared
+                server: 192.168.4.32
+                path: /mnt/tank/claude/worker
 ---
 # 1pm ET (17:00 UTC during EDT)
 apiVersion: batch/v1
@@ -825,8 +825,8 @@ spec:
               emptyDir: {}
             - name: output
               nfs:
-                server: 192.168.4.27
-                path: /mnt/nfs/shared
+                server: 192.168.4.32
+                path: /mnt/tank/claude/worker
 ---
 # 5pm ET (21:00 UTC during EDT)
 apiVersion: batch/v1
@@ -908,8 +908,8 @@ spec:
               emptyDir: {}
             - name: output
               nfs:
-                server: 192.168.4.27
-                path: /mnt/nfs/shared
+                server: 192.168.4.32
+                path: /mnt/tank/claude/worker
 ---
 # ==============================================================================
 # ACQUISITION-READINESS CronJobs (7)
@@ -1013,8 +1013,8 @@ spec:
               emptyDir: {}
             - name: output
               nfs:
-                server: 192.168.4.27
-                path: /mnt/nfs/shared
+                server: 192.168.4.32
+                path: /mnt/tank/claude/worker
 ---
 # 10am ET (14:00 UTC during EDT) — fairness & bias
 apiVersion: batch/v1
@@ -1097,8 +1097,8 @@ spec:
               emptyDir: {}
             - name: output
               nfs:
-                server: 192.168.4.27
-                path: /mnt/nfs/shared
+                server: 192.168.4.32
+                path: /mnt/tank/claude/worker
 ---
 # 11am ET (15:00 UTC during EDT) — proprietary data moat
 apiVersion: batch/v1
@@ -1181,8 +1181,8 @@ spec:
               emptyDir: {}
             - name: output
               nfs:
-                server: 192.168.4.27
-                path: /mnt/nfs/shared
+                server: 192.168.4.32
+                path: /mnt/tank/claude/worker
 ---
 # 12pm ET (16:00 UTC during EDT) — trust & enterprise procurement
 apiVersion: batch/v1
@@ -1265,8 +1265,8 @@ spec:
               emptyDir: {}
             - name: output
               nfs:
-                server: 192.168.4.27
-                path: /mnt/nfs/shared
+                server: 192.168.4.32
+                path: /mnt/tank/claude/worker
 ---
 # 2pm ET (18:00 UTC during EDT) — ATS integration depth + public API
 apiVersion: batch/v1
@@ -1349,8 +1349,8 @@ spec:
               emptyDir: {}
             - name: output
               nfs:
-                server: 192.168.4.27
-                path: /mnt/nfs/shared
+                server: 192.168.4.32
+                path: /mnt/tank/claude/worker
 ---
 # 3pm ET (19:00 UTC during EDT) — case studies + ROI proof
 apiVersion: batch/v1
@@ -1433,8 +1433,8 @@ spec:
               emptyDir: {}
             - name: output
               nfs:
-                server: 192.168.4.27
-                path: /mnt/nfs/shared
+                server: 192.168.4.32
+                path: /mnt/tank/claude/worker
 ---
 # 4pm ET (20:00 UTC during EDT) — adjacent expansion (internal mobility / L&D)
 apiVersion: batch/v1
@@ -1517,5 +1517,5 @@ spec:
               emptyDir: {}
             - name: output
               nfs:
-                server: 192.168.4.27
-                path: /mnt/nfs/shared
+                server: 192.168.4.32
+                path: /mnt/tank/claude/worker

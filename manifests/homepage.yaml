@@ -145,16 +145,8 @@ data:
 
     - Claude:
         - Claude Worker (trialday):
-            href: https://files.bluebuck-micro.ts.net/shared/claude-worker/
-            description: Autonomous Claude sessions on trialday — 9am/1pm/5pm Mon–Fri logs + WORKLOG
-            icon: anthropic.png
-        - TrialDay realism audit:
-            href: https://files.bluebuck-micro.ts.net/shared/claude-projects/trialday-audit/
-            description: Weekly Monday audit of TrialDay realism gaps (remote routine)
-            icon: anthropic.png
-        - Robinhood report:
-            href: https://files.bluebuck-micro.ts.net/shared/claude-projects/robinhood-report/
-            description: Daily portfolio + watchlist snapshot (remote routine)
+            href: https://files.bluebuck-micro.ts.net/claude/worker/
+            description: Autonomous Claude sessions on trialday — 10 daily logs (realism + acquisition prompts) + WORKLOG
             icon: anthropic.png
 
     - Admin:
@@ -207,11 +199,11 @@ data:
             description: Notebooks for numerical methods / signal processing / labs
             icon: jupyter.png
         - Sandbox (Ubuntu shell):
-            href: https://home.192.168.4.27.nip.io
+            href: https://github.com/ByVictorrr/rpi-cluster/blob/main/manifests/sandbox.yaml
             description: "kubectl -n sandbox exec -it deploy/sandbox -- bash  →  verilator, ghdl, ngspice, octave, RISC-V cross"
             icon: ubuntu.png
         - Kerneldev (SSH target):
-            href: https://home.192.168.4.27.nip.io
+            href: https://github.com/ByVictorrr/rpi-cluster/blob/main/manifests/kerneldev.yaml
             description: "ssh -p 30024 root@192.168.4.27 (after ssh-copy-id)  →  QEMU + gdb-multiarch for kernel modules"
             icon: linux.png
         - MQTT (Mosquitto):
