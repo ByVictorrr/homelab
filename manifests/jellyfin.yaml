@@ -48,11 +48,11 @@ metadata:
   namespace: jellyfin
 spec:
   accessModes: [ReadWriteMany]
-  storageClassName: nfs-1
-  volumeName: nfs-media           # rpi-control:/mnt/nfs/media (see manifests/nfs-storage.yaml)
+  storageClassName: nfs-tank
+  volumeName: tank-media          # 192.168.4.32:/mnt/tank/media (see manifests/tank-storage.yaml)
   resources:
     requests:
-      storage: 900Gi
+      storage: 24Ti
 ---
 apiVersion: apps/v1
 kind: Deployment

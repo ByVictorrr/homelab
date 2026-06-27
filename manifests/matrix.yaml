@@ -1,0 +1,110 @@
+---
+# Matrix — self-hosted chat using continuwuity (community fork of conduwuit
+# after the upstream project was taken private). Lightweight Rust homeserver,
+# single binary, rocksdb-backed, ARM-friendly. Picked over Synapse for Pi
+# resource cost (~150MB RAM vs Synapse's ~1GB+), picked over Dendrite for
+# config simplicity (env vars vs many DB connection strings).
+#
+# Tailscale-only by default — federation with matrix.org is disabled because
+# the server_name (matrix.bluebuck-micro.ts.net) isn't reachable from the
+# public internet. Accounts created on this server can chat among themselves
+# fine. To enable federation later, move to a real public domain + Tailscale
+# Funnel or port-forward 443/8448.
+#
+# First-time setup:
+#   1. Apply manifest:
+#        kubectl apply -f manifests/matrix.yaml
+#        kubectl apply -f manifests/matrix-tailscale.yaml
+#
+#   2. Grab the one-time registration token from logs (continuwuity prints
+#      it the first time it boots):
+#        kubectl -n matrix logs deploy/matrix | grep -i "registration token"
+#
+#   3. Install Element (https://element.io) on phone/desktop. On login:
+#        Homeserver URL: https://matrix.bluebuck-micro.ts.net
+#        Sign up with the registration token from step 2.
+#
+#   4. Promote yourself to server admin — DM the bot user
+#      `@conduit:matrix.bluebuck-micro.ts.net` from Element. The first
+#      message bootstraps an admin room; from there run:
+#        !admin users make-admin @YOU:matrix.bluebuck-micro.ts.net
+#
+# Media storage lives on the PVC; if family starts sharing photos/videos,
+# bump matrix-data size or move it to tank-storage.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: matrix
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: matrix-data
+  namespace: matrix
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: matrix
+  namespace: matrix
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: matrix
+  template:
+    metadata:
+      labels:
+        app: matrix
+    spec:
+      containers:
+        - name: continuwuity
+          image: forgejo.ellis.link/continuwuation/continuwuity:latest
+          ports:
+            - { containerPort: 6167, name: http }
+          env:
+            - { name: CONTINUWUITY_SERVER_NAME,      value: "matrix.bluebuck-micro.ts.net" }
+            - { name: CONTINUWUITY_DATABASE_PATH,    value: "/var/lib/continuwuity" }
+            - { name: CONTINUWUITY_PORT,             value: "6167" }
+            - { name: CONTINUWUITY_ADDRESS,          value: "0.0.0.0" }
+            - { name: CONTINUWUITY_ALLOW_FEDERATION, value: "false" }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/continuwuity
+          readinessProbe:
+            httpGet:
+              path: /_matrix/client/versions
+              port: 6167
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "2000m"
+              memory: "1Gi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: matrix-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: matrix
+  namespace: matrix
+spec:
+  selector:
+    app: matrix
+  ports:
+    - { name: http, port: 80, targetPort: 6167 }

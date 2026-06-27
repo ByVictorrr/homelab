@@ -1,0 +1,432 @@
+---
+# BookWyrm — self-hosted social book tracker (Goodreads alternative).
+# Shelves: read / currently-reading / want-to-read / owned. ISBN barcode
+# scan from a phone browser → OpenLibrary lookup → added to shelf.
+# Federates via ActivityPub if you ever want to share with friends elsewhere;
+# off by default — single-household setup.
+#
+# Architecture: one Pod (replicas: 1) runs 4 containers — web (gunicorn),
+# celery_worker, celery_beat, nginx (serves static + reverse-proxies to web).
+# Postgres + Redis are separate Deployments. The single-pod / single-replica
+# layout is fine for a home library (no HA needed) and avoids RWX storage
+# that would be needed if web/celery were split across pods.
+#
+# IMAGE NOTE: BookWyrm ships only a Dockerfile (no published image). We build
+# it ourselves into the in-cluster registry. Initial arm64 build takes ~20 min
+# on a Pi (Pillow / lxml / cryptography compile from C source — no wheels);
+# rebuilds with kaniko cache are 2-3 min. Rebuild via:
+#   kubectl -n buildkit delete job bookwyrm-build --ignore-not-found
+#   kubectl apply -f - <<'YAML'
+#   apiVersion: batch/v1
+#   kind: Job
+#   metadata: { name: bookwyrm-build, namespace: buildkit }
+#   spec:
+#     backoffLimit: 1
+#     ttlSecondsAfterFinished: 7200
+#     template:
+#       spec:
+#         restartPolicy: Never
+#         containers:
+#           - name: kaniko
+#             image: gcr.io/kaniko-project/executor:v1.23.2
+#             args:
+#               - --context=git://github.com/bookwyrm-social/bookwyrm.git#refs/heads/main
+#               - --dockerfile=Dockerfile
+#               - --destination=192.168.4.27:5000/bookwyrm:local
+#               - --insecure
+#               - --skip-tls-verify
+#   YAML
+# After the Job completes, restart the bookwyrm pod to pick up the new image:
+#   kubectl -n bookwyrm rollout restart deploy/bookwyrm
+#
+# First-time install:
+#   1. kubectl apply -f manifests/bookwyrm.yaml
+#
+#   2. Create the secret with random values:
+#        kubectl -n bookwyrm create secret generic bookwyrm-secrets \
+#          --from-literal=SECRET_KEY="$(openssl rand -hex 32)" \
+#          --from-literal=POSTGRES_PASSWORD="$(openssl rand -base64 24)" \
+#          --from-literal=EMAIL_HOST_PASSWORD="" \
+#          --dry-run=client -o yaml | kubectl apply -f -
+#      (Keep these values — the same Secret is consumed by both postgres
+#      and the bookwyrm pod; rotating it requires updating the postgres
+#      user too.)
+#
+#   3. Wait for the init container to run migrate + initdb + collectstatic
+#      (~2 min on Pi 5 first boot), then the pod goes Ready:
+#        kubectl -n bookwyrm get pods -w
+#
+#   4. Create the first admin. BookWyrm uses an invite-code flow rather
+#      than a default password:
+#        kubectl -n bookwyrm exec deploy/bookwyrm -c web -- \
+#          python manage.py admin_code
+#      Copy the printed code → browse to https://books.192.168.4.27.nip.io
+#      → click Register → paste the code. First account becomes admin.
+#
+#   5. (Optional) Lock down registration: Admin → Settings → Site Settings
+#      → switch "Allow Registration" to invite-only.
+#
+# Adding books:
+#   - Phone browser: tap "Add Book" → camera button → scan ISBN barcode
+#   - Manual search by title/author (OpenLibrary backend)
+#   - Bulk import from Goodreads CSV: Settings → CSV Import
+#
+# Resource budget on Pi 5 8GB:
+#   - postgres 13            ~150MB
+#   - redis                  ~30MB
+#   - bookwyrm pod           ~600MB (web + 2 celery + nginx)
+#   Total ~800MB.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookwyrm
+---
+# Secret skeleton — NOT declared here. Created out-of-band so re-applying
+# this manifest doesn't clobber the live secret. See step 2 above.
+# Required keys: SECRET_KEY, POSTGRES_PASSWORD, EMAIL_HOST_PASSWORD.
+---
+# Postgres data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bookwyrm-postgres-data
+  namespace: bookwyrm
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Image storage — book covers + user avatars. 10Gi is generous for a
+# personal library; resize via `kubectl edit pvc` if it ever fills up.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bookwyrm-images
+  namespace: bookwyrm
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Non-secret env. (SECRET_KEY, POSTGRES_PASSWORD, EMAIL_HOST_PASSWORD come
+# from the Secret created out-of-band; see header.)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bookwyrm-env
+  namespace: bookwyrm
+data:
+  DEBUG: "false"
+  USE_HTTPS: "true"
+  DOMAIN: "books.bluebuck-micro.ts.net"
+  ALLOWED_HOSTS: "books.192.168.4.27.nip.io,books.bluebuck-micro.ts.net,localhost"
+  BOOKWYRM_DATABASE_BACKEND: "postgres"
+  POSTGRES_HOST: "bookwyrm-postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "bookwyrm"
+  POSTGRES_USER: "bookwyrm"
+  PGPORT: "5432"
+  REDIS_ACTIVITY_HOST: "bookwyrm-redis"
+  REDIS_ACTIVITY_PORT: "6379"
+  REDIS_ACTIVITY_DB_INDEX: "0"
+  REDIS_ACTIVITY_PASSWORD: ""
+  REDIS_BROKER_HOST: "bookwyrm-redis"
+  REDIS_BROKER_PORT: "6379"
+  REDIS_BROKER_DB_INDEX: "1"
+  REDIS_BROKER_PASSWORD: ""
+  CELERY_BROKER: "redis://bookwyrm-redis:6379/1"
+  CELERY_RESULT_BACKEND: "redis://bookwyrm-redis:6379/1"
+  ENABLE_PREVIEW_IMAGES: "true"
+  ENABLE_THUMBNAIL_GENERATION: "true"
+  TIMEZONE: "America/Los_Angeles"
+  MEDIA_ROOT: "images/"
+  USE_S3: "false"
+  EMAIL_HOST: ""
+  EMAIL_PORT: "587"
+  EMAIL_HOST_USER: ""
+  EMAIL_USE_TLS: "true"
+  EMAIL_USE_SSL: "false"
+  EMAIL_SENDER_NAME: "BookWyrm"
+  EMAIL_SENDER_DOMAIN: "books.bluebuck-micro.ts.net"
+---
+# nginx config — serves /static and /images directly off disk, proxies
+# everything else to the gunicorn sidecar at 127.0.0.1:8000.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bookwyrm-nginx
+  namespace: bookwyrm
+data:
+  default.conf: |
+    upstream web {
+      server 127.0.0.1:8000;
+    }
+    server {
+      listen 80 default_server;
+      server_name _;
+      client_max_body_size 50M;
+
+      location /static/ {
+        alias /app/static/;
+        access_log off;
+        expires 30d;
+      }
+      location /images/ {
+        alias /app/images/;
+        access_log off;
+        expires 30d;
+      }
+      location / {
+        proxy_pass http://web;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_redirect off;
+      }
+    }
+---
+# === Postgres ===
+apiVersion: v1
+kind: Service
+metadata:
+  name: bookwyrm-postgres
+  namespace: bookwyrm
+spec:
+  selector:
+    app: bookwyrm-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookwyrm-postgres
+  namespace: bookwyrm
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: bookwyrm-postgres }
+  template:
+    metadata:
+      labels: { app: bookwyrm-postgres }
+    spec:
+      containers:
+        # Postgres 14+ required by BookWyrm's Django (db_version_supported check).
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - { name: POSTGRES_USER, value: bookwyrm }
+            - { name: POSTGRES_DB,   value: bookwyrm }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: bookwyrm-secrets, key: POSTGRES_PASSWORD }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - { containerPort: 5432, name: postgres }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "bookwyrm"]
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "50m",   memory: "128Mi" }
+            limits:   { cpu: "1000m", memory: "512Mi" }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: bookwyrm-postgres-data }
+---
+# === Redis (single instance — DB 0 = activity stream, DB 1 = celery broker) ===
+apiVersion: v1
+kind: Service
+metadata:
+  name: bookwyrm-redis
+  namespace: bookwyrm
+spec:
+  selector:
+    app: bookwyrm-redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookwyrm-redis
+  namespace: bookwyrm
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bookwyrm-redis }
+  template:
+    metadata:
+      labels: { app: bookwyrm-redis }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - { containerPort: 6379, name: redis }
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "20m",  memory: "32Mi"  }
+            limits:   { cpu: "200m", memory: "128Mi" }
+---
+# === BookWyrm app — single Pod, four containers ===
+apiVersion: v1
+kind: Service
+metadata:
+  name: bookwyrm
+  namespace: bookwyrm
+spec:
+  selector:
+    app: bookwyrm
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookwyrm
+  namespace: bookwyrm
+spec:
+  replicas: 1
+  strategy: { type: Recreate }     # images PVC is RWO; old pod must release first
+  selector:
+    matchLabels: { app: bookwyrm }
+  template:
+    metadata:
+      labels: { app: bookwyrm }
+    spec:
+      initContainers:
+        - name: migrate-collectstatic
+          image: 192.168.4.27:5000/bookwyrm:local
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "==> waiting for postgres..."
+              until python -c "import socket,os; s=socket.socket(); s.settimeout(2); s.connect((os.environ['POSTGRES_HOST'], int(os.environ['POSTGRES_PORT']))); s.close()" 2>/dev/null; do sleep 2; done
+              echo "==> migrate..."
+              python manage.py migrate
+              echo "==> initdb (idempotent — groups/permissions)..."
+              python manage.py initdb || true
+              echo "==> collectstatic..."
+              python manage.py collectstatic --no-input
+              echo "==> copying static into shared emptyDir..."
+              cp -r /app/static/. /static-out/
+          envFrom:
+            - configMapRef: { name: bookwyrm-env }
+            - secretRef:    { name: bookwyrm-secrets }
+          volumeMounts:
+            - { name: static, mountPath: /static-out }
+            - { name: images, mountPath: /app/images }
+      containers:
+        - name: web
+          image: 192.168.4.27:5000/bookwyrm:local
+          command: ["sh", "-c"]
+          args:
+            - "gunicorn bookwyrm.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 90"
+          envFrom:
+            - configMapRef: { name: bookwyrm-env }
+            - secretRef:    { name: bookwyrm-secrets }
+          ports:
+            - { containerPort: 8000, name: web }
+          volumeMounts:
+            - { name: images, mountPath: /app/images }
+          readinessProbe:
+            tcpSocket: { port: 8000 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "100m",  memory: "256Mi" }
+            limits:   { cpu: "1500m", memory: "768Mi" }
+        - name: celery-worker
+          image: 192.168.4.27:5000/bookwyrm:local
+          command: ["sh", "-c"]
+          args:
+            - "celery -A celerywyrm worker -l INFO -Q high_priority,medium_priority,low_priority,streams,images,suggested_users,email,connectors,lists,inbox,imports,import_triggered,broadcast,misc"
+          envFrom:
+            - configMapRef: { name: bookwyrm-env }
+            - secretRef:    { name: bookwyrm-secrets }
+          volumeMounts:
+            - { name: images, mountPath: /app/images }
+          resources:
+            requests: { cpu: "100m",  memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "768Mi" }
+        - name: celery-beat
+          image: 192.168.4.27:5000/bookwyrm:local
+          command: ["sh", "-c"]
+          args:
+            - "rm -f /tmp/celerybeat.pid && celery -A celerywyrm beat -l INFO --pidfile=/tmp/celerybeat.pid -s /tmp/celerybeat-schedule"
+          envFrom:
+            - configMapRef: { name: bookwyrm-env }
+            - secretRef:    { name: bookwyrm-secrets }
+          resources:
+            requests: { cpu: "20m",  memory: "64Mi"  }
+            limits:   { cpu: "200m", memory: "256Mi" }
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - { containerPort: 80, name: http }
+          volumeMounts:
+            - { name: nginx-conf, mountPath: /etc/nginx/conf.d }
+            - { name: static, mountPath: /app/static, readOnly: true }
+            - { name: images, mountPath: /app/images, readOnly: true }
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+              httpHeaders:
+                - name: Host
+                  value: books.bluebuck-micro.ts.net   # in ALLOWED_HOSTS; kubelet pod-IP would be rejected by Django
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "20m",  memory: "32Mi"  }
+            limits:   { cpu: "500m", memory: "128Mi" }
+      volumes:
+        - name: static
+          emptyDir: {}
+        - name: images
+          persistentVolumeClaim: { claimName: bookwyrm-images }
+        - name: nginx-conf
+          configMap: { name: bookwyrm-nginx }
+---
+# LAN ingress — http://books.192.168.4.27.nip.io, TLS via the in-cluster CA.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bookwyrm
+  namespace: bookwyrm
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"   # Goodreads CSV import
+    cert-manager.io/cluster-issuer: cluster-ca
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [books.192.168.4.27.nip.io]
+      secretName: bookwyrm-tls
+  rules:
+    - host: books.192.168.4.27.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: bookwyrm
+                port:
+                  number: 80

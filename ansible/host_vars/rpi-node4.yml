@@ -1,0 +1,17 @@
+---
+# Per-host variables for rpi-node4 (bulk-storage tier).
+# Edit THIS file to add/remove family members on the SMB "family" share.
+# After editing, run:
+#   cd ansible && ansible-playbook playbooks/tank.yml --ask-become-pass
+# Then ssh victord@192.168.4.32 and run `sudo smbpasswd -a <new-user>` to set their password.
+
+# Everyone who should be able to connect to smb://192.168.4.32/family.
+# Each entry becomes:
+#   - a Linux user on rpi-node4 (no login shell, no home dir)
+#   - a member of the `family` group
+#   - listed in `valid users` in /etc/samba/smb.conf
+# An SMB password still has to be set per user via `smbpasswd -a` (interactive).
+samba_users:
+  - victord
+  - mom
+  - wife

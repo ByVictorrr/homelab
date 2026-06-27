@@ -1,13 +1,30 @@
 ---
 # claude-worker — autonomous Claude Code "work day" on the cluster.
 #
-# Three CronJobs (9am / 1pm / 5pm ET, Mon-Fri) each spin up a pod that:
+# Ten CronJobs per workday (Mon-Fri). Three "realism" sessions on the
+# simulation pipeline (morning/midday/evening) plus seven "acquisition
+# readiness" sessions, each focused on a specific theme that makes TrialDay
+# look like a must-buy to an HR-tech acquirer (Workday, Greenhouse,
+# SAP SuccessFactors, etc):
+#
+#   12:00 UTC  claude-acq-architecture   acquirer-friendly architecture
+#   13:00 UTC  claude-morning            simulation realism
+#   14:00 UTC  claude-acq-bias           fairness/bias story (AEDT, EU AI Act)
+#   15:00 UTC  claude-acq-data-moat      role library + benchmark database
+#   16:00 UTC  claude-acq-trust          trust/security/procurement signals
+#   17:00 UTC  claude-midday             simulation realism
+#   18:00 UTC  claude-acq-integrations   ATS integration breadth + public API
+#   19:00 UTC  claude-acq-outcomes       case studies + ROI proof
+#   20:00 UTC  claude-acq-expansion      internal mobility / L&D adjacency
+#   21:00 UTC  claude-evening            simulation realism + EOD handoff
+#
+# Each spin up a pod that:
 #   1. Installs `@anthropic-ai/claude-code` from npm (~30s on a Pi)
 #   2. Clones ByVictorrr/trialday via SSH (was: worksim, renamed)
 #   3. Checks out (or creates) branch `auto/main` — a single rolling branch
 #      so each session continues where the prior one left off, day to day.
 #   4. Reads WORKLOG.md to see where the previous session left off
-#   5. Runs `claude -p` with the timeslot-specific prompt (morning / midday / evening)
+#   5. Runs `claude -p` with the timeslot-specific prompt (one of the ten)
 #   6. Commits + pushes any changes Claude made
 #
 # Then at 6pm ET, `manifests/trialday-builder.yaml` rebuilds the cluster
@@ -56,13 +73,25 @@
 #   # Trigger one manually (e.g. test the morning prompt right now):
 #   kubectl -n claude-worker create job --from=cronjob/claude-morning manual-$(date +%s)
 #
-# To pause: `kubectl -n claude-worker patch cronjob claude-morning -p '{"spec":{"suspend":true}}'`
-# (repeat for midday/evening). Same with `false` to resume.
+# To pause one: `kubectl -n claude-worker patch cronjob claude-morning -p '{"spec":{"suspend":true}}'`
+# To pause all acquisition jobs:
+#   for n in architecture bias data-moat trust integrations outcomes expansion; do
+#     kubectl -n claude-worker patch cronjob claude-acq-$n -p '{"spec":{"suspend":true}}'
+#   done
+# Same with `false` to resume.
 #
-# Cron times are UTC. Currently EDT (UTC-4), so:
-#   13:00 UTC = 9am  ET
-#   17:00 UTC = 1pm  ET
-#   21:00 UTC = 5pm  ET
+# Cron times are UTC. Currently EDT (UTC-4), so the wall-clock layout is:
+#   12:00 UTC = 8am  ET   architecture
+#   13:00 UTC = 9am  ET   morning  (realism)
+#   14:00 UTC = 10am ET   bias
+#   15:00 UTC = 11am ET   data-moat
+#   16:00 UTC = 12pm ET   trust
+#   17:00 UTC = 1pm  ET   midday   (realism)
+#   18:00 UTC = 2pm  ET   integrations
+#   19:00 UTC = 3pm  ET   outcomes
+#   20:00 UTC = 4pm  ET   expansion
+#   21:00 UTC = 5pm  ET   evening  (realism + EOD handoff)
+# The 22:00 UTC slot is intentionally left to the trialday-builder rebuild.
 # When EST kicks in (Nov-Mar) these slide an hour earlier in local time. Adjust
 # the cron expressions if you care; the workday-emulation point is unchanged.
 apiVersion: v1
@@ -231,6 +260,18 @@ data:
     ByVictorrr/worksim). Relevant entry points include the white-collar JD
     classifier, role routing, and the simulation generation flow.
 
+    **Realism gap to chip away at:** the current sim generators lean heavily
+    on Jira / Kanban-board mechanics (ticket assigned → in-progress → review
+    → done) for every role. That fits PM / SWE-style roles but reads as fake
+    for roles whose real day isn't ticket-driven — e.g. sales, marketing,
+    finance/accounting, ops, legal, recruiting, support, exec. When the
+    morning's pick is open-ended, audit the role-routing output: find a role
+    where the generated day still defaults to a Jira/Kanban scaffold and
+    replace it with the artifacts that role actually uses (CRM pipeline,
+    campaign brief, close-the-books checklist, contract redlines, candidate
+    pipeline, ticket queue with SLAs, board deck, etc.). Pick ONE role per
+    session — don't try to refactor the whole router.
+
     Process:
 
     1. Read `WORKLOG.md`. If it has unfinished work from a prior session,
@@ -270,7 +311,12 @@ data:
     2. If tests are broken, fix them first. A red build is the top priority.
     3. Continue the morning's task. If it's already finished and committed,
        pick the next item from the morning's plan (or the next obvious
-       improvement in the JD → simulation area).
+       improvement in the JD → simulation area). If you're picking fresh,
+       prefer continuing the realism push: find another role whose simulated
+       day still defaults to Jira/Kanban scaffolding and replace it with the
+       artifacts that role actually uses (CRM pipeline, campaign brief,
+       close-the-books checklist, contract redlines, candidate pipeline,
+       support queue with SLAs, board deck, etc.). One role per session.
     4. Same commit hygiene as the morning: small commits, conventional
        messages, tests green before committing.
     5. Update `WORKLOG.md` with progress + what's left for the evening
@@ -306,6 +352,314 @@ data:
     5. Commit the worklog. That's it. Do not start a new feature.
 
     Same rules: no `.env` edits, no `.github/` edits, no `git push`.
+
+  # ==========================================================================
+  # ACQUISITION-READINESS PROMPTS
+  # --------------------------------------------------------------------------
+  # Each of the seven prompts below is owned by ONE focused theme that an
+  # HR-tech acquirer (Workday / Greenhouse / SAP SuccessFactors / iCIMS) will
+  # weigh during diligence. Unlike the morning/midday/evening triad, these do
+  # NOT share a common task list — each prompt operates in its own scope of
+  # the codebase, so they can run on the same `auto/main` branch without
+  # stepping on each other.
+  #
+  # State coordination is by `git log --oneline` rather than WORKLOG.md: each
+  # prompt instructs the model to grep the recent commit history for its
+  # own conventional-commit prefix and continue where prior sessions left off.
+  # ==========================================================================
+
+  bias.md: |
+    Acquisition-readiness session: **fairness & bias** story.
+
+    Why this matters: HR-tech acquirers do diligence on EEOC compliance,
+    NYC AEDT Local Law 144, and EU AI Act readiness. A credible bias story
+    is gating — buyers will not absorb a candidate-scoring product without
+    one.
+
+    Scope (only touch these surfaces):
+    - `src/app/company/bias/**` — adverse impact dashboard for hiring teams
+    - `src/app/legal/fairness/**` — public fairness/validation methodology
+    - `src/app/api/bias-audit/**` — bias audit report endpoint
+    - `src/lib/fairness/**` — disparate impact, four-fifths rule, name-blind
+    - Score/report code that needs a fairness hook
+
+    Backlog (pick ONE per session; ship it; stop):
+    1. Company-side adverse impact dashboard — pass rates by self-reported
+       demographic with four-fifths rule flagging in red
+    2. Public `/legal/fairness` page describing validation methodology
+       (placeholder numbers are fine — the *narrative* is the deliverable)
+    3. `/api/bias-audit/[companyId]` endpoint that renders the NYC AEDT
+       bias audit report shape (print-CSS HTML is enough, no PDF lib)
+    4. Name-blind evaluation mode — mask candidate name + photo from the
+       AI evaluator and from reviewers until a decision is recorded
+    5. Calibrated rater agreement page — inter-rater reliability narrative
+    6. Demographic voluntary self-id opt-in flow
+
+    Process:
+    1. `git log --oneline -30 | grep -iE 'fairness|bias|audit'` — see what
+       prior sessions in this theme already shipped; do not duplicate.
+    2. Pick ONE backlog item. If a previous session started one and didn't
+       finish, continue that.
+    3. Implement on branch `auto/main`. Small commits with conventional
+       prefixes: `feat(fairness):` / `feat(bias):` / `feat(audit):` /
+       `test(fairness):`.
+    4. Run `npm test` (or a narrower vitest) before each commit. Never
+       commit a red build.
+
+    Rules: no `.env` edits, no `.github/` edits, no `git push` (the runner
+    does it).
+
+  data-moat.md: |
+    Acquisition-readiness session: **proprietary data moat** — the role
+    content library and the benchmark database.
+
+    Why this matters: Workday can build features. They acquire for content
+    and data they can't rebuild. "8 roles" looks small; "200+ validated
+    simulations across 14 industries, benchmarked against 50,000 sessions"
+    looks like an asset. Even partial progress towards those numbers,
+    surfaced in the product, materially changes the diligence narrative.
+
+    Scope:
+    - `src/lib/roles/**` and `prisma/seed*.ts` — role library expansion
+    - `src/app/dashboard/benchmarks/**` — benchmark browsing UI
+    - `src/app/api/benchmarks/**` — benchmark query endpoints
+    - `src/lib/taxonomy/**` — skills taxonomy mapped to O*NET / Lightcast
+    - Marketing pages that surface the catalog count
+
+    Backlog (pick ONE per session):
+    1. Add one new role with a complete simulation config (JD, scenario,
+       teammates, scoring rubric, hidden challenge). Look at existing roles
+       for the shape.
+    2. Industry + level filters on the benchmark browser (e.g. "Senior
+       SWE at Series B"). Filter the query, then expose in the UI.
+    3. Skills taxonomy mapping: add `src/lib/taxonomy/onet.ts` with a
+       minimal O*NET code lookup; tag at least 3 roles with their codes.
+    4. Catalog count badge on the landing/pricing page driven by an actual
+       DB count, not a hardcoded number — so the number grows automatically.
+    5. Public `/catalog` page listing available role simulations with
+       SEO-friendly URLs.
+    6. Benchmark percentile API for embedding into a third-party (the
+       endpoint shape future ATSes would integrate against).
+
+    Process:
+    1. `git log --oneline -30 | grep -iE 'role|taxonomy|benchmark|catalog'`
+    2. Pick ONE. Ship a small slice. Conventional commits:
+       `feat(roles):` / `feat(taxonomy):` / `feat(benchmark):` /
+       `feat(catalog):`.
+    3. `npm test` green before each commit. Never red.
+
+    Rules: no `.env`, no `.github/`, no `git push`.
+
+  trust.md: |
+    Acquisition-readiness session: **trust & enterprise procurement
+    signals**. The shape of the trust page, the security narrative, and
+    the procurement-facing artifacts a buyer's IT/legal team will demand.
+
+    Why this matters: enterprise buyers (and acquirers' integration teams)
+    will not even start a POC without a recognizable trust posture. Most of
+    this work is signaling — having the page, the artifact, the
+    sub-processors list — long before the underlying audit is real. "SOC 2
+    Type II in progress" beats no mention at all by orders of magnitude.
+
+    Scope:
+    - `src/app/trust/**` — public trust hub
+    - `src/app/security/**` — security posture page
+    - `src/app/legal/dpa/**`, `src/app/legal/sub-processors/**`,
+      `src/app/legal/msa/**`
+    - `src/app/status/**` — static status page stub (or external link)
+    - Footer links from existing pages into the trust hub
+
+    Backlog (pick ONE per session):
+    1. `/trust` hub page — SOC 2 / GDPR / CCPA badges (mark in-progress
+       honestly), links to security, DPA, sub-processors, status
+    2. `/security` page — encryption at rest/in transit, access controls,
+       backup posture, incident response, pen test cadence
+    3. `/legal/sub-processors` — table of vendors (Anthropic, Supabase,
+       Clerk, Vercel/k3s, Stripe, ...) with purpose + region
+    4. `/legal/dpa` and `/legal/msa` downloadable / printable shells
+    5. `/status` stub — link out to a real status page (status.trialday.app)
+       or an inline static "All systems operational" placeholder
+    6. Footer revamp on every public page to expose the trust hub link
+
+    Process:
+    1. `git log --oneline -30 | grep -iE 'trust|security|dpa|sub-proc|msa|status'`
+    2. Pick ONE. Conventional commits: `feat(trust):` / `feat(security):` /
+       `feat(legal):`.
+    3. `npm test` green before each commit.
+
+    Rules: no `.env`, no `.github/`, no `git push`.
+
+  integrations.md: |
+    Acquisition-readiness session: **integration depth** — the marketplace
+    surface and the public API.
+
+    Why this matters: one webhook is a feature. A logo grid of supported
+    ATSes plus a documented public API is a *platform*. Acquirers map your
+    integration footprint to their own ecosystem and the gap they'd inherit.
+
+    Scope:
+    - `src/app/integrations/**` — public integrations hub + per-vendor pages
+    - `src/app/api/v1/**` — versioned public API surface
+    - `src/app/docs/**` — developer docs (API reference, webhooks)
+    - `src/lib/integrations/**` — vendor adapters (Greenhouse, Lever, etc)
+    - `src/app/company/integrations/**` — in-app integration management
+
+    Backlog (pick ONE per session):
+    1. Integrations hub `/integrations` with a logo grid: Workday,
+       Greenhouse, Lever, iCIMS, Ashby, SAP SuccessFactors, BambooHR —
+       each linking to its own /integrations/[slug] detail page (the
+       detail pages can be stubs marked "Available / Coming soon")
+    2. Public API surface at `/api/v1/sessions` (read) — token-auth'd,
+       returns the public-safe shape of a SimSession
+    3. Developer docs at `/docs/api` — endpoint reference, auth, rate limits
+    4. Greenhouse adapter shell in `src/lib/integrations/greenhouse.ts`
+       beyond the generic webhook (typed payloads, signature verification)
+    5. Lever adapter shell in `src/lib/integrations/lever.ts`
+    6. In-app `/company/integrations` management page — per-vendor enable
+       toggles, credential storage shape (no real OAuth needed yet)
+    7. OpenAPI spec stub at `/api/openapi.json` describing the public API
+
+    Process:
+    1. `git log --oneline -30 | grep -iE 'integration|api/v1|greenhouse|lever|workday|openapi'`
+    2. Pick ONE. Conventional commits: `feat(integrations):` /
+       `feat(api):` / `feat(docs):`.
+    3. `npm test` green before each commit.
+
+    Rules: no `.env`, no `.github/`, no `git push`.
+
+  outcomes.md: |
+    Acquisition-readiness session: **outcomes proof** — case studies, ROI
+    calculator, and the logo wall.
+
+    Why this matters: every acquirer asks "what do customers actually get?"
+    Even pilot-quality testimonials with one quantifiable number each
+    ("47% faster time-to-hire") move the conversation from feature
+    comparison to value capture. Stage-appropriate, not fabricated — but
+    *present* beats absent.
+
+    Scope:
+    - `src/app/customers/**` — public case studies (one page per logo)
+    - `src/app/roi/**` — ROI calculator
+    - `src/components/marketing/LogoWall.tsx` and any landing-page surface
+    - `src/app/pricing/**` — where ROI typically gets surfaced
+
+    Backlog (pick ONE per session):
+    1. Case study template page `src/app/customers/[slug]/page.tsx` with
+       a clean layout (challenge / solution / outcome / quote / metric)
+    2. First case study at `/customers/example-co` with placeholder
+       company name + realistic-looking numbers (clearly flagged as
+       illustrative until a real customer signs off)
+    3. Second case study with a different role-type focus
+    4. `/roi` calculator — inputs: open reqs, avg time-to-hire,
+       cost-per-hire; outputs: projected savings; tie into pricing
+    5. Reusable `<LogoWall>` component dropped on landing + pricing
+    6. "Featured in" press strip — even just publication logos with
+       "as covered in" framing (only use logos you can legitimately cite)
+
+    Process:
+    1. `git log --oneline -30 | grep -iE 'customer|roi|case-stud|logo|press'`
+    2. Pick ONE. Conventional commits: `feat(customers):` / `feat(roi):` /
+       `feat(marketing):`.
+    3. `npm test` green before each commit.
+
+    IMPORTANT: do NOT invent real customer names, logos, or quotes. Use
+    obviously-illustrative placeholders ("Acme Co", "Example Inc") and
+    add a small "illustrative example" note until real customers approve.
+
+    Rules: no `.env`, no `.github/`, no `git push`.
+
+  expansion.md: |
+    Acquisition-readiness session: **adjacent expansion** — re-position
+    TrialDay from "another assessment tool" to "the workforce simulation
+    platform" by extending into internal mobility and L&D.
+
+    Why this matters: Workday's strategic interest is workforce planning,
+    internal mobility, succession planning, and L&D — not just
+    pre-hire assessment. A product that *also* serves existing employees
+    is a much bigger acquisition narrative (and a much bigger TAM slide)
+    than one that only serves hiring.
+
+    Scope:
+    - `src/app/internal/**` — internal mobility flows (employees taking
+      sims to explore lateral moves)
+    - `src/app/onboarding/**` — post-hire simulation flow for new hires
+    - `src/app/ld/**` — learning & development framing
+    - `src/lib/sim/modes.ts` — simulation "mode" abstraction
+      (`hiring` | `internal-mobility` | `onboarding` | `ld`)
+    - Marketing pages that explain the use cases
+
+    Backlog (pick ONE per session):
+    1. Add a `mode` discriminator to SimSession (default `hiring`) and
+       thread it through the existing scoring/report code without
+       changing behavior. Foundation for everything else here.
+    2. `/internal` landing page — explain the internal mobility use case
+       to enterprise buyers
+    3. `/onboarding` landing page — post-hire ramp via simulated week-1
+       scenarios
+    4. `/ld` landing page — upskilling framing with the existing role
+       library as the curriculum
+    5. Internal-mobility flow in `/sim` that uses a different report
+       template (focus on fit + growth areas, not pass/fail)
+    6. "Mode" selector in company settings — which use cases this org
+       has enabled
+
+    Process:
+    1. `git log --oneline -30 | grep -iE 'internal|onboarding|mobility|ld|mode'`
+    2. Pick ONE. If item 1 (mode discriminator) hasn't shipped yet, do
+       that first — the others depend on it.
+    3. Conventional commits: `feat(internal):` / `feat(onboarding):` /
+       `feat(ld):` / `feat(sim):` for the mode plumbing.
+    4. `npm test` green before each commit.
+
+    Rules: no `.env`, no `.github/`, no `git push`.
+
+  architecture.md: |
+    Acquisition-readiness session: **acquirer-friendly architecture** —
+    the technical talking points an acquirer's integration team will
+    grep the codebase for during diligence.
+
+    Why this matters: at the corp-dev → engineering handoff, an
+    acquirer's tech-lead opens the repo and looks for: multi-tenant
+    isolation, vendor abstraction (so they're not locked into Anthropic),
+    auditable event streams (so they can pipe data into their warehouse),
+    and clean module boundaries. Bonus points for typed contracts and a
+    plug-in shape for the simulation engine.
+
+    Scope:
+    - `src/lib/ai/**` — AI provider abstraction (currently Anthropic-only)
+    - `src/lib/events/**` — activity log as an event stream + export
+    - `src/lib/tenancy/**` — explicit tenant-isolation helpers
+    - `src/app/api/v1/events/**` — event-stream export endpoint
+    - Docs in `docs/architecture/**` (create if absent) — diagrams +
+      ADRs (architectural decision records)
+
+    Backlog (pick ONE per session):
+    1. AI provider interface in `src/lib/ai/provider.ts` — an `LLMProvider`
+       interface; refactor one Anthropic call site to go through it.
+       Don't rip out Anthropic; just prove the abstraction works.
+    2. Event-stream shape in `src/lib/events/types.ts` — typed event
+       union for everything currently going into the activity log
+    3. `/api/v1/events?since=...` endpoint that streams (JSONL) the
+       event log for a given company — the shape an acquirer would
+       wire into Snowflake/BigQuery
+    4. Tenant-isolation audit helper `src/lib/tenancy/scope.ts` —
+       wraps Prisma queries to require an explicit companyId scope
+    5. `docs/architecture/overview.md` — one-page architecture summary
+       with a Mermaid diagram (multi-tenant, plugin registry, AI layer)
+    6. First ADR at `docs/architecture/adr/0001-plugin-registry.md`
+       explaining why the role/tool registry pattern was chosen
+    7. Plugin manifest schema for the tool registry — typed JSON shape
+       so third-party tools could in principle ship as packages
+
+    Process:
+    1. `git log --oneline -30 | grep -iE 'ai/provider|events|tenancy|adr|architecture|plugin'`
+    2. Pick ONE. Refactors must be behavior-preserving — no functional
+       changes, tests stay green.
+    3. Conventional commits: `refactor(ai):` / `feat(events):` /
+       `feat(tenancy):` / `docs(architecture):`.
+    4. `npm test` green before each commit.
+
+    Rules: no `.env`, no `.github/`, no `git push`.
 ---
 # Shared CronJob template. Each timeslot is a thin wrapper that sets TIMESLOT
 # and the schedule. apiVersion/kind below.
@@ -372,9 +726,16 @@ spec:
               configMap:
                 name: claude-worker-config
                 items:
-                  - { key: morning.md, path: morning.md }
-                  - { key: midday.md,  path: midday.md  }
-                  - { key: evening.md, path: evening.md }
+                  - { key: morning.md,      path: morning.md      }
+                  - { key: midday.md,       path: midday.md       }
+                  - { key: evening.md,      path: evening.md      }
+                  - { key: bias.md,         path: bias.md         }
+                  - { key: data-moat.md,    path: data-moat.md    }
+                  - { key: trust.md,        path: trust.md        }
+                  - { key: integrations.md, path: integrations.md }
+                  - { key: outcomes.md,     path: outcomes.md     }
+                  - { key: expansion.md,    path: expansion.md    }
+                  - { key: architecture.md, path: architecture.md }
             - name: git-ssh
               secret:
                 secretName: git-ssh
@@ -446,9 +807,16 @@ spec:
               configMap:
                 name: claude-worker-config
                 items:
-                  - { key: morning.md, path: morning.md }
-                  - { key: midday.md,  path: midday.md  }
-                  - { key: evening.md, path: evening.md }
+                  - { key: morning.md,      path: morning.md      }
+                  - { key: midday.md,       path: midday.md       }
+                  - { key: evening.md,      path: evening.md      }
+                  - { key: bias.md,         path: bias.md         }
+                  - { key: data-moat.md,    path: data-moat.md    }
+                  - { key: trust.md,        path: trust.md        }
+                  - { key: integrations.md, path: integrations.md }
+                  - { key: outcomes.md,     path: outcomes.md     }
+                  - { key: expansion.md,    path: expansion.md    }
+                  - { key: architecture.md, path: architecture.md }
             - name: git-ssh
               secret:
                 secretName: git-ssh
@@ -466,6 +834,8 @@ kind: CronJob
 metadata:
   name: claude-evening
   namespace: claude-worker
+  labels:
+    app.kubernetes.io/component: realism
 spec:
   schedule: "0 21 * * 1-5"
   timeZone: "Etc/UTC"
@@ -520,9 +890,625 @@ spec:
               configMap:
                 name: claude-worker-config
                 items:
-                  - { key: morning.md, path: morning.md }
-                  - { key: midday.md,  path: midday.md  }
-                  - { key: evening.md, path: evening.md }
+                  - { key: morning.md,      path: morning.md      }
+                  - { key: midday.md,       path: midday.md       }
+                  - { key: evening.md,      path: evening.md      }
+                  - { key: bias.md,         path: bias.md         }
+                  - { key: data-moat.md,    path: data-moat.md    }
+                  - { key: trust.md,        path: trust.md        }
+                  - { key: integrations.md, path: integrations.md }
+                  - { key: outcomes.md,     path: outcomes.md     }
+                  - { key: expansion.md,    path: expansion.md    }
+                  - { key: architecture.md, path: architecture.md }
+            - name: git-ssh
+              secret:
+                secretName: git-ssh
+                defaultMode: 0600
+            - name: home
+              emptyDir: {}
+            - name: output
+              nfs:
+                server: 192.168.4.27
+                path: /mnt/nfs/shared
+---
+# ==============================================================================
+# ACQUISITION-READINESS CronJobs (7)
+# ------------------------------------------------------------------------------
+# These mirror the structure of claude-morning/midday/evening, but each runs a
+# focused acquisition-readiness prompt instead of the realism prompts. They all
+# share the same `auto/main` rolling branch — the prompts scope each session to
+# disjoint surface areas of the codebase so the sessions don't step on each
+# other within a day.
+#
+# Schedule (UTC, Mon-Fri):
+#   12:00  architecture
+#   14:00  bias
+#   15:00  data-moat
+#   16:00  trust
+#   18:00  integrations
+#   19:00  outcomes
+#   20:00  expansion
+# (13/17/21 UTC are the existing realism slots; 22:00 UTC belongs to the
+# trialday-builder rebuild.)
+# ==============================================================================
+
+# 8am ET (12:00 UTC during EDT) — acquirer-friendly architecture
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-acq-architecture
+  namespace: claude-worker
+  labels:
+    app.kubernetes.io/component: acquisition
+    trialday.app/theme: architecture
+spec:
+  schedule: "0 12 * * 1-5"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: claude-worker, timeslot: architecture }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: claude
+              image: node:22-slim
+              command: ["/bin/bash", "/scripts/run.sh"]
+              env:
+                - { name: TIMESLOT,    value: "architecture" }
+                - { name: HOME,        value: "/root" }
+                - { name: IS_SANDBOX,  value: "1" }
+                - name: ANTHROPIC_API_KEY
+                  valueFrom: { secretKeyRef: { name: anthropic-api, key: api-key } }
+                - name: GIT_REPO_URL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_REPO_URL } }
+                - name: GIT_USER_NAME
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_NAME } }
+                - name: GIT_USER_EMAIL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_EMAIL } }
+                - name: CLAUDE_MODEL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MODEL } }
+                - name: CLAUDE_MAX_TURNS
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MAX_TURNS } }
+              volumeMounts:
+                - { name: scripts,  mountPath: /scripts,  readOnly: true }
+                - { name: prompts,  mountPath: /prompts,  readOnly: true }
+                - { name: git-ssh,  mountPath: /secrets/git-ssh, readOnly: true }
+                - { name: home,     mountPath: /root }
+                - { name: output,   mountPath: /output }
+              resources:
+                requests: { cpu: "500m", memory: "1Gi" }
+                limits:   { cpu: "2",    memory: "2Gi" }
+          volumes:
+            - name: scripts
+              configMap:
+                name: claude-worker-config
+                items: [{ key: run.sh, path: run.sh, mode: 0755 }]
+            - name: prompts
+              configMap:
+                name: claude-worker-config
+                items:
+                  - { key: morning.md,      path: morning.md      }
+                  - { key: midday.md,       path: midday.md       }
+                  - { key: evening.md,      path: evening.md      }
+                  - { key: bias.md,         path: bias.md         }
+                  - { key: data-moat.md,    path: data-moat.md    }
+                  - { key: trust.md,        path: trust.md        }
+                  - { key: integrations.md, path: integrations.md }
+                  - { key: outcomes.md,     path: outcomes.md     }
+                  - { key: expansion.md,    path: expansion.md    }
+                  - { key: architecture.md, path: architecture.md }
+            - name: git-ssh
+              secret:
+                secretName: git-ssh
+                defaultMode: 0600
+            - name: home
+              emptyDir: {}
+            - name: output
+              nfs:
+                server: 192.168.4.27
+                path: /mnt/nfs/shared
+---
+# 10am ET (14:00 UTC during EDT) — fairness & bias
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-acq-bias
+  namespace: claude-worker
+  labels:
+    app.kubernetes.io/component: acquisition
+    trialday.app/theme: bias
+spec:
+  schedule: "0 14 * * 1-5"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: claude-worker, timeslot: bias }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: claude
+              image: node:22-slim
+              command: ["/bin/bash", "/scripts/run.sh"]
+              env:
+                - { name: TIMESLOT,    value: "bias" }
+                - { name: HOME,        value: "/root" }
+                - { name: IS_SANDBOX,  value: "1" }
+                - name: ANTHROPIC_API_KEY
+                  valueFrom: { secretKeyRef: { name: anthropic-api, key: api-key } }
+                - name: GIT_REPO_URL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_REPO_URL } }
+                - name: GIT_USER_NAME
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_NAME } }
+                - name: GIT_USER_EMAIL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_EMAIL } }
+                - name: CLAUDE_MODEL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MODEL } }
+                - name: CLAUDE_MAX_TURNS
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MAX_TURNS } }
+              volumeMounts:
+                - { name: scripts,  mountPath: /scripts,  readOnly: true }
+                - { name: prompts,  mountPath: /prompts,  readOnly: true }
+                - { name: git-ssh,  mountPath: /secrets/git-ssh, readOnly: true }
+                - { name: home,     mountPath: /root }
+                - { name: output,   mountPath: /output }
+              resources:
+                requests: { cpu: "500m", memory: "1Gi" }
+                limits:   { cpu: "2",    memory: "2Gi" }
+          volumes:
+            - name: scripts
+              configMap:
+                name: claude-worker-config
+                items: [{ key: run.sh, path: run.sh, mode: 0755 }]
+            - name: prompts
+              configMap:
+                name: claude-worker-config
+                items:
+                  - { key: morning.md,      path: morning.md      }
+                  - { key: midday.md,       path: midday.md       }
+                  - { key: evening.md,      path: evening.md      }
+                  - { key: bias.md,         path: bias.md         }
+                  - { key: data-moat.md,    path: data-moat.md    }
+                  - { key: trust.md,        path: trust.md        }
+                  - { key: integrations.md, path: integrations.md }
+                  - { key: outcomes.md,     path: outcomes.md     }
+                  - { key: expansion.md,    path: expansion.md    }
+                  - { key: architecture.md, path: architecture.md }
+            - name: git-ssh
+              secret:
+                secretName: git-ssh
+                defaultMode: 0600
+            - name: home
+              emptyDir: {}
+            - name: output
+              nfs:
+                server: 192.168.4.27
+                path: /mnt/nfs/shared
+---
+# 11am ET (15:00 UTC during EDT) — proprietary data moat
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-acq-data-moat
+  namespace: claude-worker
+  labels:
+    app.kubernetes.io/component: acquisition
+    trialday.app/theme: data-moat
+spec:
+  schedule: "0 15 * * 1-5"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: claude-worker, timeslot: data-moat }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: claude
+              image: node:22-slim
+              command: ["/bin/bash", "/scripts/run.sh"]
+              env:
+                - { name: TIMESLOT,    value: "data-moat" }
+                - { name: HOME,        value: "/root" }
+                - { name: IS_SANDBOX,  value: "1" }
+                - name: ANTHROPIC_API_KEY
+                  valueFrom: { secretKeyRef: { name: anthropic-api, key: api-key } }
+                - name: GIT_REPO_URL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_REPO_URL } }
+                - name: GIT_USER_NAME
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_NAME } }
+                - name: GIT_USER_EMAIL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_EMAIL } }
+                - name: CLAUDE_MODEL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MODEL } }
+                - name: CLAUDE_MAX_TURNS
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MAX_TURNS } }
+              volumeMounts:
+                - { name: scripts,  mountPath: /scripts,  readOnly: true }
+                - { name: prompts,  mountPath: /prompts,  readOnly: true }
+                - { name: git-ssh,  mountPath: /secrets/git-ssh, readOnly: true }
+                - { name: home,     mountPath: /root }
+                - { name: output,   mountPath: /output }
+              resources:
+                requests: { cpu: "500m", memory: "1Gi" }
+                limits:   { cpu: "2",    memory: "2Gi" }
+          volumes:
+            - name: scripts
+              configMap:
+                name: claude-worker-config
+                items: [{ key: run.sh, path: run.sh, mode: 0755 }]
+            - name: prompts
+              configMap:
+                name: claude-worker-config
+                items:
+                  - { key: morning.md,      path: morning.md      }
+                  - { key: midday.md,       path: midday.md       }
+                  - { key: evening.md,      path: evening.md      }
+                  - { key: bias.md,         path: bias.md         }
+                  - { key: data-moat.md,    path: data-moat.md    }
+                  - { key: trust.md,        path: trust.md        }
+                  - { key: integrations.md, path: integrations.md }
+                  - { key: outcomes.md,     path: outcomes.md     }
+                  - { key: expansion.md,    path: expansion.md    }
+                  - { key: architecture.md, path: architecture.md }
+            - name: git-ssh
+              secret:
+                secretName: git-ssh
+                defaultMode: 0600
+            - name: home
+              emptyDir: {}
+            - name: output
+              nfs:
+                server: 192.168.4.27
+                path: /mnt/nfs/shared
+---
+# 12pm ET (16:00 UTC during EDT) — trust & enterprise procurement
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-acq-trust
+  namespace: claude-worker
+  labels:
+    app.kubernetes.io/component: acquisition
+    trialday.app/theme: trust
+spec:
+  schedule: "0 16 * * 1-5"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: claude-worker, timeslot: trust }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: claude
+              image: node:22-slim
+              command: ["/bin/bash", "/scripts/run.sh"]
+              env:
+                - { name: TIMESLOT,    value: "trust" }
+                - { name: HOME,        value: "/root" }
+                - { name: IS_SANDBOX,  value: "1" }
+                - name: ANTHROPIC_API_KEY
+                  valueFrom: { secretKeyRef: { name: anthropic-api, key: api-key } }
+                - name: GIT_REPO_URL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_REPO_URL } }
+                - name: GIT_USER_NAME
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_NAME } }
+                - name: GIT_USER_EMAIL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_EMAIL } }
+                - name: CLAUDE_MODEL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MODEL } }
+                - name: CLAUDE_MAX_TURNS
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MAX_TURNS } }
+              volumeMounts:
+                - { name: scripts,  mountPath: /scripts,  readOnly: true }
+                - { name: prompts,  mountPath: /prompts,  readOnly: true }
+                - { name: git-ssh,  mountPath: /secrets/git-ssh, readOnly: true }
+                - { name: home,     mountPath: /root }
+                - { name: output,   mountPath: /output }
+              resources:
+                requests: { cpu: "500m", memory: "1Gi" }
+                limits:   { cpu: "2",    memory: "2Gi" }
+          volumes:
+            - name: scripts
+              configMap:
+                name: claude-worker-config
+                items: [{ key: run.sh, path: run.sh, mode: 0755 }]
+            - name: prompts
+              configMap:
+                name: claude-worker-config
+                items:
+                  - { key: morning.md,      path: morning.md      }
+                  - { key: midday.md,       path: midday.md       }
+                  - { key: evening.md,      path: evening.md      }
+                  - { key: bias.md,         path: bias.md         }
+                  - { key: data-moat.md,    path: data-moat.md    }
+                  - { key: trust.md,        path: trust.md        }
+                  - { key: integrations.md, path: integrations.md }
+                  - { key: outcomes.md,     path: outcomes.md     }
+                  - { key: expansion.md,    path: expansion.md    }
+                  - { key: architecture.md, path: architecture.md }
+            - name: git-ssh
+              secret:
+                secretName: git-ssh
+                defaultMode: 0600
+            - name: home
+              emptyDir: {}
+            - name: output
+              nfs:
+                server: 192.168.4.27
+                path: /mnt/nfs/shared
+---
+# 2pm ET (18:00 UTC during EDT) — ATS integration depth + public API
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-acq-integrations
+  namespace: claude-worker
+  labels:
+    app.kubernetes.io/component: acquisition
+    trialday.app/theme: integrations
+spec:
+  schedule: "0 18 * * 1-5"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: claude-worker, timeslot: integrations }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: claude
+              image: node:22-slim
+              command: ["/bin/bash", "/scripts/run.sh"]
+              env:
+                - { name: TIMESLOT,    value: "integrations" }
+                - { name: HOME,        value: "/root" }
+                - { name: IS_SANDBOX,  value: "1" }
+                - name: ANTHROPIC_API_KEY
+                  valueFrom: { secretKeyRef: { name: anthropic-api, key: api-key } }
+                - name: GIT_REPO_URL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_REPO_URL } }
+                - name: GIT_USER_NAME
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_NAME } }
+                - name: GIT_USER_EMAIL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_EMAIL } }
+                - name: CLAUDE_MODEL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MODEL } }
+                - name: CLAUDE_MAX_TURNS
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MAX_TURNS } }
+              volumeMounts:
+                - { name: scripts,  mountPath: /scripts,  readOnly: true }
+                - { name: prompts,  mountPath: /prompts,  readOnly: true }
+                - { name: git-ssh,  mountPath: /secrets/git-ssh, readOnly: true }
+                - { name: home,     mountPath: /root }
+                - { name: output,   mountPath: /output }
+              resources:
+                requests: { cpu: "500m", memory: "1Gi" }
+                limits:   { cpu: "2",    memory: "2Gi" }
+          volumes:
+            - name: scripts
+              configMap:
+                name: claude-worker-config
+                items: [{ key: run.sh, path: run.sh, mode: 0755 }]
+            - name: prompts
+              configMap:
+                name: claude-worker-config
+                items:
+                  - { key: morning.md,      path: morning.md      }
+                  - { key: midday.md,       path: midday.md       }
+                  - { key: evening.md,      path: evening.md      }
+                  - { key: bias.md,         path: bias.md         }
+                  - { key: data-moat.md,    path: data-moat.md    }
+                  - { key: trust.md,        path: trust.md        }
+                  - { key: integrations.md, path: integrations.md }
+                  - { key: outcomes.md,     path: outcomes.md     }
+                  - { key: expansion.md,    path: expansion.md    }
+                  - { key: architecture.md, path: architecture.md }
+            - name: git-ssh
+              secret:
+                secretName: git-ssh
+                defaultMode: 0600
+            - name: home
+              emptyDir: {}
+            - name: output
+              nfs:
+                server: 192.168.4.27
+                path: /mnt/nfs/shared
+---
+# 3pm ET (19:00 UTC during EDT) — case studies + ROI proof
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-acq-outcomes
+  namespace: claude-worker
+  labels:
+    app.kubernetes.io/component: acquisition
+    trialday.app/theme: outcomes
+spec:
+  schedule: "0 19 * * 1-5"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: claude-worker, timeslot: outcomes }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: claude
+              image: node:22-slim
+              command: ["/bin/bash", "/scripts/run.sh"]
+              env:
+                - { name: TIMESLOT,    value: "outcomes" }
+                - { name: HOME,        value: "/root" }
+                - { name: IS_SANDBOX,  value: "1" }
+                - name: ANTHROPIC_API_KEY
+                  valueFrom: { secretKeyRef: { name: anthropic-api, key: api-key } }
+                - name: GIT_REPO_URL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_REPO_URL } }
+                - name: GIT_USER_NAME
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_NAME } }
+                - name: GIT_USER_EMAIL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_EMAIL } }
+                - name: CLAUDE_MODEL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MODEL } }
+                - name: CLAUDE_MAX_TURNS
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MAX_TURNS } }
+              volumeMounts:
+                - { name: scripts,  mountPath: /scripts,  readOnly: true }
+                - { name: prompts,  mountPath: /prompts,  readOnly: true }
+                - { name: git-ssh,  mountPath: /secrets/git-ssh, readOnly: true }
+                - { name: home,     mountPath: /root }
+                - { name: output,   mountPath: /output }
+              resources:
+                requests: { cpu: "500m", memory: "1Gi" }
+                limits:   { cpu: "2",    memory: "2Gi" }
+          volumes:
+            - name: scripts
+              configMap:
+                name: claude-worker-config
+                items: [{ key: run.sh, path: run.sh, mode: 0755 }]
+            - name: prompts
+              configMap:
+                name: claude-worker-config
+                items:
+                  - { key: morning.md,      path: morning.md      }
+                  - { key: midday.md,       path: midday.md       }
+                  - { key: evening.md,      path: evening.md      }
+                  - { key: bias.md,         path: bias.md         }
+                  - { key: data-moat.md,    path: data-moat.md    }
+                  - { key: trust.md,        path: trust.md        }
+                  - { key: integrations.md, path: integrations.md }
+                  - { key: outcomes.md,     path: outcomes.md     }
+                  - { key: expansion.md,    path: expansion.md    }
+                  - { key: architecture.md, path: architecture.md }
+            - name: git-ssh
+              secret:
+                secretName: git-ssh
+                defaultMode: 0600
+            - name: home
+              emptyDir: {}
+            - name: output
+              nfs:
+                server: 192.168.4.27
+                path: /mnt/nfs/shared
+---
+# 4pm ET (20:00 UTC during EDT) — adjacent expansion (internal mobility / L&D)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-acq-expansion
+  namespace: claude-worker
+  labels:
+    app.kubernetes.io/component: acquisition
+    trialday.app/theme: expansion
+spec:
+  schedule: "0 20 * * 1-5"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: claude-worker, timeslot: expansion }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: claude
+              image: node:22-slim
+              command: ["/bin/bash", "/scripts/run.sh"]
+              env:
+                - { name: TIMESLOT,    value: "expansion" }
+                - { name: HOME,        value: "/root" }
+                - { name: IS_SANDBOX,  value: "1" }
+                - name: ANTHROPIC_API_KEY
+                  valueFrom: { secretKeyRef: { name: anthropic-api, key: api-key } }
+                - name: GIT_REPO_URL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_REPO_URL } }
+                - name: GIT_USER_NAME
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_NAME } }
+                - name: GIT_USER_EMAIL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: GIT_USER_EMAIL } }
+                - name: CLAUDE_MODEL
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MODEL } }
+                - name: CLAUDE_MAX_TURNS
+                  valueFrom: { configMapKeyRef: { name: claude-worker-config, key: CLAUDE_MAX_TURNS } }
+              volumeMounts:
+                - { name: scripts,  mountPath: /scripts,  readOnly: true }
+                - { name: prompts,  mountPath: /prompts,  readOnly: true }
+                - { name: git-ssh,  mountPath: /secrets/git-ssh, readOnly: true }
+                - { name: home,     mountPath: /root }
+                - { name: output,   mountPath: /output }
+              resources:
+                requests: { cpu: "500m", memory: "1Gi" }
+                limits:   { cpu: "2",    memory: "2Gi" }
+          volumes:
+            - name: scripts
+              configMap:
+                name: claude-worker-config
+                items: [{ key: run.sh, path: run.sh, mode: 0755 }]
+            - name: prompts
+              configMap:
+                name: claude-worker-config
+                items:
+                  - { key: morning.md,      path: morning.md      }
+                  - { key: midday.md,       path: midday.md       }
+                  - { key: evening.md,      path: evening.md      }
+                  - { key: bias.md,         path: bias.md         }
+                  - { key: data-moat.md,    path: data-moat.md    }
+                  - { key: trust.md,        path: trust.md        }
+                  - { key: integrations.md, path: integrations.md }
+                  - { key: outcomes.md,     path: outcomes.md     }
+                  - { key: expansion.md,    path: expansion.md    }
+                  - { key: architecture.md, path: architecture.md }
             - name: git-ssh
               secret:
                 secretName: git-ssh

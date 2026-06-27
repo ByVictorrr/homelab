@@ -42,7 +42,7 @@ stringData:
     users:
       victord:
         displayname: "Victor"
-        password: "$argon2id$v=19$m=65536,t=3,p=4$NDhmMDExZGU1ZjU5NWViMw$WpvfsFHJOI+3/D5RoW3C1uKmbTUzvRyI2yvriv5/8Pc"
+        password: "$argon2id$v=19$m=65536,t=3,p=4$gEY/R6v9muqD3aY3XvRISA$Qh+Ga4GF5qvo9qHHOorFoAqNtvydTo1qqkVYpzeS2+U"
         email: victord@example.com
         groups:
           - admins
@@ -124,6 +124,13 @@ spec:
       labels: { app: authelia }
     spec:
       enableServiceLinks: false
+      # Pinned to rpi-node2: that's where the Longhorn replica for the
+      # authelia-data PVC lives, AND the longhorn-engine binary on rpi-node4
+      # SIGSEGVs on startup (Go nil-pointer in gRPC, affects every PVC
+      # scheduled there). Investigate rpi-node4 separately; until then,
+      # any stateful workload that lands on it will get stuck attaching.
+      nodeSelector:
+        kubernetes.io/hostname: rpi-node2
       containers:
         - name: authelia
           image: authelia/authelia:latest

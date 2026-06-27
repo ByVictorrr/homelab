@@ -1,4 +1,4 @@
----
+aud--
 # Expose Home Assistant over Tailscale at https://homeassistant.bluebuck-micro.ts.net.
 # Lets the HA mobile app reach the server from cellular / away from home.
 # Prereq: Tailscale operator installed (see PROGRESS.md).

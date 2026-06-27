@@ -1,0 +1,173 @@
+---
+# Mosquitto — MQTT broker. Lightweight pub/sub message bus for IoT devices and
+# services. Topics map device→data flows (e.g. home/livingroom/temp). Common
+# consumers on this cluster: Home Assistant (Zigbee2MQTT bridge, sensor input),
+# Frigate (camera events), homemade ESP32 sensors, anything that wants a tiny
+# event bus.
+#
+# First-time setup:
+#   1. Generate a password file locally (needs `mosquitto-clients` installed):
+#        touch passwords
+#        mosquitto_passwd -b passwords homeassistant CHANGE_ME
+#        mosquitto_passwd -b passwords frigate       CHANGE_ME
+#      (add one entry per client; the file is plaintext-username + hashed-pw)
+#
+#   2. Apply manifest, then load the password file into the cluster:
+#        kubectl apply -f manifests/mosquitto.yaml
+#        kubectl -n mosquitto create secret generic mosquitto-passwords \
+#          --from-file=passwords=./passwords \
+#          --dry-run=client -o yaml | kubectl apply -f -
+#        kubectl -n mosquitto rollout restart deploy/mosquitto
+#        rm passwords        # don't commit it
+#
+#   3. From inside the cluster:
+#        mosquitto.mosquitto.svc.cluster.local:1883
+#      From the LAN (ESP32 sensors, mqtt-explorer, etc.) — get the LB IP:
+#        kubectl -n mosquitto get svc mosquitto-lb
+#
+# Topic convention: <area>/<room>/<device>/<measurement>
+#   home/livingroom/sensor1/temperature
+#   home/garage/door/state
+#
+# Smoke test from your laptop (needs `mosquitto-clients`):
+#   LB=$(kubectl -n mosquitto get svc mosquitto-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+#   mosquitto_sub -h $LB -p 1883 -u homeassistant -P CHANGE_ME -t 'home/#' -v &
+#   mosquitto_pub -h $LB -p 1883 -u homeassistant -P CHANGE_ME -t home/test -m hello
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mosquitto
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mosquitto-config
+  namespace: mosquitto
+data:
+  mosquitto.conf: |
+    persistence true
+    persistence_location /mosquitto/data/
+
+    log_dest stdout
+    log_type error
+    log_type warning
+    log_type notice
+    log_type information
+
+    listener 1883
+    protocol mqtt
+
+    listener 9001
+    protocol websockets
+
+    allow_anonymous false
+    password_file /mosquitto/config/passwords
+---
+# Placeholder so the Deployment starts cleanly before you run the
+# `kubectl create secret … mosquitto-passwords` step above. Replace with the
+# real one — mosquitto refuses to start with an empty/missing password_file
+# when allow_anonymous is false, so the pod will CrashLoop until you load it.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mosquitto-passwords
+  namespace: mosquitto
+type: Opaque
+stringData:
+  passwords: ""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mosquitto-data
+  namespace: mosquitto
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mosquitto
+  namespace: mosquitto
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mosquitto
+  template:
+    metadata:
+      labels:
+        app: mosquitto
+    spec:
+      containers:
+        - name: mosquitto
+          image: eclipse-mosquitto:2
+          ports:
+            - { containerPort: 1883, name: mqtt }
+            - { containerPort: 9001, name: ws }
+          volumeMounts:
+            - name: config
+              mountPath: /mosquitto/config/mosquitto.conf
+              subPath: mosquitto.conf
+            - name: passwords
+              mountPath: /mosquitto/config/passwords
+              subPath: passwords
+            - name: data
+              mountPath: /mosquitto/data
+          readinessProbe:
+            tcpSocket:
+              port: 1883
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+      volumes:
+        - name: config
+          configMap:
+            name: mosquitto-config
+        - name: passwords
+          secret:
+            secretName: mosquitto-passwords
+        - name: data
+          persistentVolumeClaim:
+            claimName: mosquitto-data
+---
+# ClusterIP for in-cluster consumers (Home Assistant, Frigate, etc.).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mosquitto
+  namespace: mosquitto
+spec:
+  selector:
+    app: mosquitto
+  ports:
+    - { name: mqtt, port: 1883, targetPort: 1883 }
+    - { name: ws,   port: 9001, targetPort: 9001 }
+---
+# LoadBalancer for LAN consumers (ESP32s, mqtt-explorer on your laptop, etc.).
+# k3s ships with klipper-lb so this gets a node IP without MetalLB.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mosquitto-lb
+  namespace: mosquitto
+spec:
+  type: LoadBalancer
+  selector:
+    app: mosquitto
+  ports:
+    - { name: mqtt, port: 1883, targetPort: 1883 }
+    - { name: ws,   port: 9001, targetPort: 9001 }

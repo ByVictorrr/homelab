@@ -1,0 +1,210 @@
+---
+# Auto-loaded Grafana dashboard for the Pi 5 PMIC metrics dropped by the
+# pmic-textfile-collector systemd timer on each Pi (see
+# ansible/playbooks/monitoring.yml). The kube-prometheus-stack Grafana
+# sidecar picks up any ConfigMap labelled `grafana_dashboard: "1"` in any
+# namespace it watches.
+#
+# Apply:
+#   kubectl apply -f manifests/grafana-dashboard-rpi-power.yaml
+# Then in Grafana: Dashboards → "rpi-cluster — Power & Thermals"
+# (~30 s for the sidecar to notice the ConfigMap.)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rpi-power-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  rpi-power.json: |
+    {
+      "title": "rpi-cluster — Power & Thermals",
+      "uid": "rpi-power",
+      "schemaVersion": 39,
+      "version": 1,
+      "tags": ["rpi", "power", "homelab"],
+      "timezone": "browser",
+      "time": { "from": "now-1h", "to": "now" },
+      "refresh": "30s",
+      "panels": [
+        {
+          "id": 1,
+          "title": "Cluster SoC watts (sum)",
+          "type": "stat",
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+          "targets": [
+            { "expr": "sum(rpi_pmic_total_watts)", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "watt",
+              "decimals": 1,
+              "color": { "mode": "thresholds" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green",  "value": null },
+                  { "color": "yellow", "value": 25 },
+                  { "color": "red",    "value": 40 }
+                ]
+              }
+            }
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "id": 2,
+          "title": "Hottest Pi right now",
+          "type": "stat",
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+          "targets": [
+            { "expr": "max(rpi_soc_temp_celsius)", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "celsius",
+              "decimals": 1,
+              "color": { "mode": "thresholds" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green",  "value": null },
+                  { "color": "yellow", "value": 65 },
+                  { "color": "orange", "value": 75 },
+                  { "color": "red",    "value": 80 }
+                ]
+              }
+            }
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "id": 3,
+          "title": "Throttling RIGHT NOW (any Pi)",
+          "type": "stat",
+          "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+          "targets": [
+            { "expr": "max(rpi_throttled_now + rpi_undervoltage_now + rpi_freq_capped_now + rpi_soft_temp_limit_now)", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "red",   "value": 1 }
+                ]
+              },
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "clean" } } }
+              ]
+            }
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "id": 4,
+          "title": "Throttling EVER (since boot)",
+          "type": "stat",
+          "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+          "targets": [
+            { "expr": "max(rpi_throttled_ever + rpi_undervoltage_ever)", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green",  "value": null },
+                  { "color": "yellow", "value": 1 }
+                ]
+              },
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "clean" } } }
+              ]
+            }
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "id": 10,
+          "title": "Per-Pi SoC watts",
+          "type": "timeseries",
+          "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+          "targets": [
+            { "expr": "rpi_pmic_total_watts", "refId": "A", "legendFormat": "{{instance}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "watt",
+              "decimals": 2,
+              "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true }
+            }
+          },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "mean", "max"] } }
+        },
+        {
+          "id": 11,
+          "title": "Per-Pi SoC temperature",
+          "type": "timeseries",
+          "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+          "targets": [
+            { "expr": "rpi_soc_temp_celsius", "refId": "A", "legendFormat": "{{instance}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "celsius",
+              "decimals": 1,
+              "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green",  "value": null },
+                  { "color": "yellow", "value": 65 },
+                  { "color": "orange", "value": 75 },
+                  { "color": "red",    "value": 80 }
+                ]
+              }
+            }
+          },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "mean", "max"] } }
+        },
+        {
+          "id": 20,
+          "title": "Per-rail watts breakdown (right now)",
+          "type": "bargauge",
+          "gridPos": { "h": 9, "w": 12, "x": 0, "y": 14 },
+          "targets": [
+            { "expr": "sum by (rail) (rpi_pmic_rail_watts)", "refId": "A", "legendFormat": "{{rail}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "watt", "decimals": 3, "color": { "mode": "continuous-GrYlRd" } }
+          },
+          "options": { "orientation": "horizontal", "displayMode": "gradient", "reduceOptions": { "calcs": ["lastNotNull"] } }
+        },
+        {
+          "id": 21,
+          "title": "Throttling bits over time",
+          "type": "timeseries",
+          "gridPos": { "h": 9, "w": 12, "x": 12, "y": 14 },
+          "targets": [
+            { "expr": "rpi_undervoltage_now", "refId": "A", "legendFormat": "undervolt {{instance}}", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+            { "expr": "rpi_throttled_now",    "refId": "B", "legendFormat": "throttled  {{instance}}", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+            { "expr": "rpi_freq_capped_now",  "refId": "C", "legendFormat": "freq-cap   {{instance}}", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+            { "expr": "rpi_soft_temp_limit_now", "refId": "D", "legendFormat": "soft-temp  {{instance}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0,
+              "max": 1,
+              "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 30, "stacking": { "mode": "none" }, "spanNulls": true }
+            }
+          },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] } }
+        }
+      ]
+    }

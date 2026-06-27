@@ -1,17 +1,18 @@
 ---
-# Simple HTTP file server — nginx serving the NFS shared folder with directory
-# autoindex enabled. Drop a file into the NFS share (Finder, kubectl cp,
-# anywhere), reach it via http://files.192.168.4.27.nip.io/<path>.
+# Simple HTTP file server — nginx serving the bulk-storage NFS pool with
+# directory autoindex enabled. Drop a file anywhere in /mnt/tank on rpi-node4
+# (Finder via SMB, kubectl cp, NFS mount), reach it via:
+#   - https://files.<tailnet>.ts.net/ (Tailscale, see Ingress at bottom)
+#   - http://files.192.168.4.27.nip.io/<path> (LAN)
 #
-# Backed by the existing nfs-2-shared PV (rpi-node3:/mnt/nfs/shared).
-# Before applying, the subpath must exist + be writable. If you haven't
-# already, on rpi-node3 once:
-#     sudo mkdir -p /mnt/nfs/shared && sudo chown nobody:nogroup /mnt/nfs/shared
+# Backed by tank-root (rpi-node4:/mnt/tank, ~24 TB, growing to ~72 TB).
+# Was previously bound to nfs-root (rpi-control:/mnt/nfs, 900 GB) — migrated
+# to the bigger tier on 2026-06-25.
 #
 # Add new files:
-#   - From Mac/PC: mount nfs://192.168.4.94/mnt/nfs and drop files in `shared/`
-#   - From cluster: any pod with a `nfs-2` storageClass PVC at this share
-#   - From terminal: ssh victord@192.168.4.94 'sudo cp my-file /mnt/nfs/shared/'
+#   - From Mac/iPhone: smb://192.168.4.32/family → /mnt/tank/family/
+#   - From cluster: any pod with a `nfs-tank` PVC pointed at tank-root or a subdir
+#   - From terminal: ssh victord@192.168.4.32 'sudo cp my-file /mnt/tank/family/'
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -24,11 +25,11 @@ metadata:
   namespace: http-fileserver
 spec:
   accessModes: [ReadWriteMany]
-  storageClassName: nfs-1
-  volumeName: nfs-root              # rpi-control:/mnt/nfs (whole share — see manifests/nfs-storage.yaml)
+  storageClassName: nfs-tank
+  volumeName: tank-root             # rpi-node4:/mnt/tank (whole pool — see manifests/tank-storage.yaml)
   resources:
     requests:
-      storage: 900Gi
+      storage: 24Ti
 ---
 apiVersion: v1
 kind: ConfigMap

@@ -1,0 +1,23 @@
+---
+# Expose ntfy on Tailscale at https://ntfy.bluebuck-micro.ts.net.
+# Tailscale gives us TLS without exposing the service publicly — the ntfy
+# Android/iOS app needs HTTPS to register the topic for push, and Tailscale's
+# cert is real (Let's Encrypt under the hood), so it works on the phone with
+# no extra trust steps.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ntfy-ts
+  namespace: ntfy
+  annotations:
+    tailscale.com/hostname: "ntfy"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - ntfy
+  defaultBackend:
+    service:
+      name: ntfy
+      port:
+        number: 80

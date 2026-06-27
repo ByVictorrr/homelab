@@ -76,6 +76,9 @@ data:
       Admin:
         style: row
         columns: 4
+      Claude:
+        style: row
+        columns: 4
 
   bookmarks.yaml: |
     - Docs:
@@ -101,6 +104,10 @@ data:
             href: https://audiobooks.bluebuck-micro.ts.net
             description: Audiobook + podcast server
             icon: audiobookshelf.png
+        - Books (BookWyrm):
+            href: https://books.bluebuck-micro.ts.net
+            description: Track books you own + want to read; ISBN barcode scan
+            icon: bookwyrm.png
         - Jellyfin (Media):
             href: https://jellyfin.bluebuck-micro.ts.net
             description: Movies, TV, music
@@ -109,6 +116,14 @@ data:
             href: https://homeassistant.bluebuck-micro.ts.net
             description: Smart home dashboard
             icon: home-assistant.png
+        - Photos (Immich):
+            href: https://photos.bluebuck-micro.ts.net
+            description: Self-hosted photo + video library, ML face/object search
+            icon: immich.png
+        - Matrix (Chat):
+            href: https://matrix.bluebuck-micro.ts.net
+            description: Federated chat — E2E encrypted rooms, voice/video
+            icon: matrix.png
 
     - Core:
         - Vaultwarden (Passwords):
@@ -123,12 +138,50 @@ data:
             href: https://files.bluebuck-micro.ts.net
             description: HTTP file share — drop-zone for the family
             icon: nginx.png
+        - ntfy (Notifications):
+            href: https://ntfy.bluebuck-micro.ts.net
+            description: HTTP push notifications — subscribe topics on phone/desktop
+            icon: ntfy.png
+
+    - Claude:
+        - Claude Worker (trialday):
+            href: https://files.bluebuck-micro.ts.net/shared/claude-worker/
+            description: Autonomous Claude sessions on trialday — 9am/1pm/5pm Mon–Fri logs + WORKLOG
+            icon: anthropic.png
+        - TrialDay realism audit:
+            href: https://files.bluebuck-micro.ts.net/shared/claude-projects/trialday-audit/
+            description: Weekly Monday audit of TrialDay realism gaps (remote routine)
+            icon: anthropic.png
+        - Robinhood report:
+            href: https://files.bluebuck-micro.ts.net/shared/claude-projects/robinhood-report/
+            description: Daily portfolio + watchlist snapshot (remote routine)
+            icon: anthropic.png
 
     - Admin:
         - Rancher:
             href: https://rancher.bluebuck-micro.ts.net
             description: Kubernetes cluster UI
             icon: rancher.png
+        - Grafana:
+            href: http://grafana.192.168.4.27.nip.io
+            description: Dashboards — per-Pi power, temps, pod CPU/mem
+            icon: grafana.png
+        - Prometheus:
+            href: http://prometheus.192.168.4.27.nip.io
+            description: Metric store + PromQL — backend for Grafana
+            icon: prometheus.png
+        - Frigate:
+            href: https://frigate.192.168.4.27.nip.io
+            description: NVR — object detection on local cameras
+            icon: frigate.png
+        - Glances:
+            href: http://192.168.4.27:61208
+            description: Per-host system monitor (DaemonSet, one per Pi)
+            icon: glances.png
+        - Authelia (auth):
+            href: https://auth.192.168.4.27.nip.io
+            description: SSO + forward-auth gating every app behind this dashboard
+            icon: authelia.png
         - Uptime Kuma:
             href: https://uptime.bluebuck-micro.ts.net
             description: Service monitoring + alerts
@@ -137,10 +190,6 @@ data:
             href: https://longhorn.bluebuck-micro.ts.net
             description: Distributed block storage admin
             icon: longhorn.png
-        - Registry:
-            href: https://registry.bluebuck-micro.ts.net
-            description: Internal container registry
-            icon: docker.png
         - TrialDay:
             href: https://trialday.bluebuck-micro.ts.net
             description: Next.js app — Clerk auth, in progress
@@ -149,6 +198,10 @@ data:
             href: http://git.192.168.4.27.nip.io
             description: Self-hosted Git — repos, issues, CI (Forgejo Actions)
             icon: forgejo.png
+        - Registry (Container images):
+            href: https://registry.bluebuck-micro.ts.net
+            description: Private OCI registry — docker push registry.bluebuck-micro.ts.net/<image>
+            icon: docker.png
         - JupyterLab:
             href: http://jupyter.192.168.4.27.nip.io
             description: Notebooks for numerical methods / signal processing / labs
@@ -161,6 +214,14 @@ data:
             href: https://home.192.168.4.27.nip.io
             description: "ssh -p 30024 root@192.168.4.27 (after ssh-copy-id)  →  QEMU + gdb-multiarch for kernel modules"
             icon: linux.png
+        - MQTT (Mosquitto):
+            href: https://mqttx.app/
+            description: "Pub/sub broker  →  tcp://192.168.4.27:1883 (ws :9001). Users: homeassistant, frigate, admin. Click → download MQTTX client."
+            icon: mosquitto.png
+        - GitHub Runners (ARC):
+            href: https://github.com/ByVictorrr
+            description: "Self-hosted Actions runners on k3s, label rpi-arm64. Autoscale 0→2. Add `runs-on: rpi-arm64` in workflows."
+            icon: github-actions.png
 
   widgets.yaml: |
     - resources:

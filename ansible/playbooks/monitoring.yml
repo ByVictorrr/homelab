@@ -1,0 +1,343 @@
+---
+# Cluster monitoring — Prometheus + Grafana + node-exporter, plus a Pi 5
+# PMIC textfile collector so you get real per-Pi power numbers.
+#
+# What you get:
+#   - Per-pod CPU / memory          (cAdvisor + kube-state-metrics)
+#   - Per-Pi CPU / RAM / disk / net  (node-exporter)
+#   - Per-Pi SoC watts               (PMIC textfile collector — this playbook)
+#   - SoC temperature                (PMIC textfile collector)
+#   - Throttling / undervoltage      (vcgencmd get_throttled bits)
+#   - K8s API / node / Longhorn      (ServiceMonitors shipped by the chart)
+#   - Grafana dashboards on day one  (kube-prometheus-stack ships a stack of them)
+#
+# What you DON'T get (yet):
+#   - True wall-socket watts. Add smart plugs (Shelly/Kasa/Tasmota) later and
+#     point Prom at them — the PMIC number is SoC rails only, it does not
+#     include USB peripherals, NVMe HATs, fans, or PSU inefficiency.
+#
+# Layout:
+#   Stage 1 (k3s_cluster, --tags pmic):
+#     - Install libraspberrypi-bin so vcgencmd exists on Ubuntu Server
+#     - Drop /usr/local/bin/pmic-textfile-collector.sh
+#     - systemd timer fires it every 15s, writes to
+#       /var/lib/node_exporter/textfile_collector/pmic.prom (atomic rename)
+#
+#   Stage 2 (localhost, --tags chart):
+#     - helm install kube-prometheus-stack into the `monitoring` namespace
+#     - node-exporter DS is configured with --collector.textfile.directory
+#       pointing at the hostPath where Stage 1 writes
+#     - Ingresses at grafana.<cp-ip>.nip.io and prometheus.<cp-ip>.nip.io
+#
+# Run:
+#   cd ansible
+#   ansible-playbook playbooks/monitoring.yml                       # both stages
+#   ansible-playbook playbooks/monitoring.yml --tags pmic           # host-side only
+#   ansible-playbook playbooks/monitoring.yml --tags chart          # chart only
+#   ansible-playbook playbooks/monitoring.yml \
+#     -e grafana_admin_password='something-yours'
+#
+# After it finishes:
+#   - Grafana:    http://grafana.<cp-ip>.nip.io/   (admin / the password above)
+#   - Prometheus: http://prometheus.<cp-ip>.nip.io/
+#   - Sanity:     curl -s http://prometheus.<cp-ip>.nip.io/api/v1/query \
+#                   --data-urlencode 'query=sum(rpi_pmic_total_watts)'
+#     → should return roughly the SoC-only watts summed across all 4 Pis (~10-20W idle)
+
+- name: Pi 5 PMIC textfile collector (host-side)
+  hosts: k3s_cluster
+  become: true
+  gather_facts: true
+  tags: [monitoring, pmic]
+  vars:
+    textfile_dir: /var/lib/node_exporter/textfile_collector
+    collector_path: /usr/local/bin/pmic-textfile-collector.sh
+    collect_interval_sec: 15
+  tasks:
+    - name: Install libraspberrypi-bin (provides vcgencmd on Ubuntu Server)
+      ansible.builtin.apt:
+        name: libraspberrypi-bin
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 600
+
+    - name: Ensure textfile collector directory exists
+      ansible.builtin.file:
+        path: "{{ textfile_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Drop PMIC textfile collector script
+      ansible.builtin.copy:
+        dest: "{{ collector_path }}"
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          # Parse `vcgencmd pmic_read_adc` into Prometheus textfile metrics.
+          # Pairs <RAIL>_A (current) with <RAIL>_V (volt) and emits per-rail watts
+          # plus a summed total. Also emits SoC temp + throttling bits.
+          set -euo pipefail
+
+          TF_DIR="{{ textfile_dir }}"
+          OUT="$TF_DIR/pmic.prom"
+          TMP="$(mktemp "$OUT.XXXXXX")"
+          trap 'rm -f "$TMP"' EXIT
+
+          declare -A current
+          declare -A volt
+
+          while IFS= read -r line; do
+            # e.g. " 3V3_SYS_A current(1)=0.41000000A"
+            if [[ "$line" =~ ^[[:space:]]*([A-Z0-9_]+)_A[[:space:]]+current\([0-9]+\)=([0-9.]+)A ]]; then
+              current["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
+            elif [[ "$line" =~ ^[[:space:]]*([A-Z0-9_]+)_V[[:space:]]+volt\([0-9]+\)=([0-9.]+)V ]]; then
+              volt["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
+            fi
+          done < <(vcgencmd pmic_read_adc)
+
+          {
+            echo "# HELP rpi_pmic_rail_amps Per-rail current from Pi 5 PMIC."
+            echo "# TYPE rpi_pmic_rail_amps gauge"
+            for rail in "${!current[@]}"; do
+              printf 'rpi_pmic_rail_amps{rail="%s"} %s\n' "$rail" "${current[$rail]}"
+            done
+
+            echo "# HELP rpi_pmic_rail_volts Per-rail voltage from Pi 5 PMIC."
+            echo "# TYPE rpi_pmic_rail_volts gauge"
+            for rail in "${!volt[@]}"; do
+              printf 'rpi_pmic_rail_volts{rail="%s"} %s\n' "$rail" "${volt[$rail]}"
+            done
+
+            total=0
+            echo "# HELP rpi_pmic_rail_watts Per-rail computed power (amps * volts)."
+            echo "# TYPE rpi_pmic_rail_watts gauge"
+            for rail in "${!current[@]}"; do
+              v="${volt[$rail]:-0}"
+              c="${current[$rail]}"
+              w=$(awk -v a="$c" -v b="$v" 'BEGIN{printf "%.6f", a*b}')
+              printf 'rpi_pmic_rail_watts{rail="%s"} %s\n' "$rail" "$w"
+              total=$(awk -v t="$total" -v w="$w" 'BEGIN{printf "%.6f", t+w}')
+            done
+
+            echo "# HELP rpi_pmic_total_watts Sum of all PMIC rail watts. SoC only — excludes USB peripherals, NVMe HATs, fans, and PSU losses."
+            echo "# TYPE rpi_pmic_total_watts gauge"
+            echo "rpi_pmic_total_watts $total"
+
+            # Throttling bits — see https://www.raspberrypi.com/documentation/computers/os.html#vcgencmd
+            raw=$(vcgencmd get_throttled | sed 's/throttled=//')
+            dec=$((raw))
+            echo "# HELP rpi_throttled_flags Raw throttled bitmask from vcgencmd get_throttled."
+            echo "# TYPE rpi_throttled_flags gauge"
+            echo "rpi_throttled_flags $dec"
+            echo "# HELP rpi_undervoltage_now 1 if currently undervolted."
+            echo "# TYPE rpi_undervoltage_now gauge"
+            echo "rpi_undervoltage_now $(( (dec >> 0) & 1 ))"
+            echo "# HELP rpi_freq_capped_now 1 if ARM frequency currently capped."
+            echo "# TYPE rpi_freq_capped_now gauge"
+            echo "rpi_freq_capped_now $(( (dec >> 1) & 1 ))"
+            echo "# HELP rpi_throttled_now 1 if currently throttled."
+            echo "# TYPE rpi_throttled_now gauge"
+            echo "rpi_throttled_now $(( (dec >> 2) & 1 ))"
+            echo "# HELP rpi_soft_temp_limit_now 1 if soft temperature limit active."
+            echo "# TYPE rpi_soft_temp_limit_now gauge"
+            echo "rpi_soft_temp_limit_now $(( (dec >> 3) & 1 ))"
+            echo "# HELP rpi_undervoltage_ever 1 if undervoltage has occurred since boot."
+            echo "# TYPE rpi_undervoltage_ever gauge"
+            echo "rpi_undervoltage_ever $(( (dec >> 16) & 1 ))"
+            echo "# HELP rpi_throttled_ever 1 if throttling has occurred since boot."
+            echo "# TYPE rpi_throttled_ever gauge"
+            echo "rpi_throttled_ever $(( (dec >> 18) & 1 ))"
+
+            temp=$(vcgencmd measure_temp | sed "s/temp=//;s/'C//")
+            echo "# HELP rpi_soc_temp_celsius SoC temperature from vcgencmd measure_temp."
+            echo "# TYPE rpi_soc_temp_celsius gauge"
+            echo "rpi_soc_temp_celsius $temp"
+          } > "$TMP"
+
+          # mktemp creates 0600; node-exporter runs as nobody and would get
+          # EACCES. Make it world-readable before the atomic rename.
+          chmod 0644 "$TMP"
+          mv "$TMP" "$OUT"
+          trap - EXIT
+
+    - name: systemd service unit for the collector
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pmic-textfile-collector.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Pi 5 PMIC -> Prometheus textfile collector
+          After=local-fs.target
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ collector_path }}
+          Nice=10
+      register: pmic_unit
+
+    - name: systemd timer that fires the collector every {{ collect_interval_sec }}s
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pmic-textfile-collector.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run PMIC textfile collector every {{ collect_interval_sec }}s
+
+          [Timer]
+          OnBootSec=30s
+          OnUnitActiveSec={{ collect_interval_sec }}s
+          AccuracySec=1s
+          Unit=pmic-textfile-collector.service
+
+          [Install]
+          WantedBy=timers.target
+      register: pmic_timer
+
+    - name: Reload systemd if units changed
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: pmic_unit.changed or pmic_timer.changed
+
+    - name: Enable + start PMIC collector timer
+      ansible.builtin.systemd:
+        name: pmic-textfile-collector.timer
+        enabled: true
+        state: started
+
+    - name: Run the collector once now so the file exists immediately
+      ansible.builtin.systemd:
+        name: pmic-textfile-collector.service
+        state: started
+      changed_when: false
+
+    - name: Show a sample of what's being scraped
+      ansible.builtin.command: head -n 30 {{ textfile_dir }}/pmic.prom
+      register: pmic_sample
+      changed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} PMIC sample:\n{{ pmic_sample.stdout }}"
+
+- name: kube-prometheus-stack (cluster-side)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [monitoring, chart]
+  vars:
+    # Both values can be overridden on the CLI; -e wins over play vars.
+    #   -e cp_ip=192.168.4.10
+    #   -e grafana_admin_password='something-yours'
+    cp_ip: "192.168.4.27"
+    monitoring_namespace: monitoring
+    textfile_dir: /var/lib/node_exporter/textfile_collector
+    grafana_admin_password: "admin-change-me"
+  tasks:
+    - name: Check helm is on PATH
+      ansible.builtin.command: helm version --short
+      changed_when: false
+
+    - name: Add prometheus-community Helm repo
+      kubernetes.core.helm_repository:
+        name: prometheus-community
+        repo_url: https://prometheus-community.github.io/helm-charts
+
+    - name: Install kube-prometheus-stack
+      kubernetes.core.helm:
+        name: kube-prometheus-stack
+        chart_ref: prometheus-community/kube-prometheus-stack
+        release_namespace: "{{ monitoring_namespace }}"
+        create_namespace: true
+        kubeconfig: "{{ kubeconfig_local_path }}"
+        wait: true
+        timeout: 15m
+        values:
+          # Disable Alertmanager for now — turn back on once you wire up a
+          # notification channel (email, ntfy, Slack, etc.).
+          alertmanager:
+            enabled: false
+
+          # Prometheus — give it a real PVC so it survives restarts.
+          prometheus:
+            ingress:
+              enabled: true
+              ingressClassName: nginx
+              hosts:
+                - "prometheus.{{ cp_ip }}.nip.io"
+            prometheusSpec:
+              retention: 15d
+              # Scrape pmic.prom + everything else node-exporter exposes.
+              scrapeInterval: 30s
+              # If you have Longhorn ready, swap this to longhorn. nfs-client is
+              # the simplest fit for now since rpi-control already exports NFS.
+              storageSpec:
+                volumeClaimTemplate:
+                  spec:
+                    accessModes: [ReadWriteOnce]
+                    resources:
+                      requests:
+                        storage: 20Gi
+
+          # Grafana — preload dashboards and stick it behind ingress.
+          grafana:
+            adminPassword: "{{ grafana_admin_password }}"
+            ingress:
+              enabled: true
+              ingressClassName: nginx
+              hosts:
+                - "grafana.{{ cp_ip }}.nip.io"
+            persistence:
+              enabled: true
+              size: 5Gi
+            defaultDashboardsEnabled: true
+            sidecar:
+              dashboards:
+                enabled: true
+                searchNamespace: ALL
+
+          # The node-exporter sub-chart needs to know where the textfile
+          # collector files live AND get a hostPath mount pointing there.
+          prometheus-node-exporter:
+            extraArgs:
+              - --collector.textfile.directory=/host/textfile
+            extraHostVolumeMounts:
+              - name: textfile
+                hostPath: "{{ textfile_dir }}"
+                mountPath: /host/textfile
+                readOnly: true
+
+    - name: Wait for Grafana rollout
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig_local_path }}
+        -n {{ monitoring_namespace }}
+        rollout status deploy/kube-prometheus-stack-grafana --timeout=10m
+      changed_when: false
+
+    - name: Wait for Prometheus statefulset
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig_local_path }}
+        -n {{ monitoring_namespace }}
+        rollout status sts/prometheus-kube-prometheus-stack-prometheus --timeout=10m
+      changed_when: false
+
+    - name: Print access info
+      ansible.builtin.debug:
+        msg:
+          - "Grafana:    http://grafana.{{ cp_ip }}.nip.io/   (admin / {{ grafana_admin_password }})"
+          - "Prometheus: http://prometheus.{{ cp_ip }}.nip.io/"
+          - "Sanity check the PMIC numbers:"
+          - "  curl -sG http://prometheus.{{ cp_ip }}.nip.io/api/v1/query --data-urlencode 'query=rpi_pmic_total_watts'"
+          - "  → expect 4 series (one per Pi), each ~3-6 W idle."
+          - "Built-in dashboards to try first:"
+          - "  - 'Kubernetes / Compute Resources / Pod'  (which pods are burning CPU)"
+          - "  - 'Node Exporter / Nodes'                  (CPU, mem, disk, net per Pi)"
+          - "Once you've got smart plugs, add a `static_configs` scrape job for them."

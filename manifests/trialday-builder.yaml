@@ -9,8 +9,11 @@
 #   3. rollout         → kubectl sets the new image tag on deploy/trialday and
 #                        waits for the rollout to complete.
 #
-# Schedule: 22:00 UTC Mon-Fri (6pm America/New_York) — 1h after the evening
-# claude-worker session starts, giving it room to finish before we build.
+# Schedule: top of every hour, every day. Each run is a no-op when auto/main
+# hasn't moved (the clone-and-test step exits early via SKIP_BUILD when the
+# deployed image already matches the branch tip), so hourly polling is cheap
+# and just means trialday.bluebuck-micro.ts.net picks up commits within an
+# hour of the claude-worker pushing them.
 #
 # Source of build args (NEXT_PUBLIC_*): the existing `trialday-env` secret in
 # the trialday namespace. Same source the manual build on the laptop uses.
@@ -196,14 +199,15 @@ data:
     kubectl -n "${TARGET_NAMESPACE}" rollout status "deploy/${TARGET_DEPLOYMENT}" --timeout=10m
     echo "==> live at https://trialday.bluebuck-micro.ts.net"
 ---
-# 22:00 UTC = 6pm America/New_York (during EDT). Mon-Fri only.
+# Hourly — see header. Skips itself when the deployed image already matches
+# the tip of auto/main, so most ticks are sub-30s no-ops.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: trialday-builder
   namespace: trialday
 spec:
-  schedule: "0 22 * * 1-5"
+  schedule: "0 * * * *"
   timeZone: "Etc/UTC"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3

@@ -56,18 +56,21 @@ metadata:
 # later: ALTER USER immich PASSWORD '<new>' inside the running pod, then
 # patch this secret to match — Immich rereads on next pod restart.
 ---
-# Library PVC — actual photo / video storage. 50 GiB on local-path; bump
-# (or migrate to Longhorn / NFS) once you start ingesting at scale.
+# Library PVC — actual photo / video storage. Bound to tank-photos
+# (rpi-node4:/mnt/tank/photos, ~24 TB on SnapRAID-protected DAS). Migrated from
+# local-path (rpi-node3 SD card, 50 Gi) on 2026-06-25. See docs/bulk-storage.md.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: immich-library
   namespace: immich
 spec:
-  accessModes: [ReadWriteOnce]
+  accessModes: [ReadWriteMany]
+  storageClassName: nfs-tank
+  volumeName: tank-photos
   resources:
     requests:
-      storage: 50Gi
+      storage: 24Ti
 ---
 # === Postgres (with pgvector + vectorchord extensions) ===
 apiVersion: v1

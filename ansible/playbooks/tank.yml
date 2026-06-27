@@ -1,0 +1,373 @@
+---
+# Bulk-storage tier on rpi-node4 — SnapRAID + mergerfs pool exposed over NFS + Samba.
+#
+# What it does (idempotent — safe to re-run):
+#   - Installs snapraid, mergerfs, nfs-kernel-server, samba on rpi-node4
+#   - Creates /mnt/tank subdir layout (family/photos/media/backups/k8s)
+#   - Creates the shared `family` Unix user + group (owns everything in the family share)
+#   - Creates each entry in `samba_users` as a no-login Unix user in the family group
+#   - Writes /etc/snapraid.conf (1 parity, N data drives)
+#   - Adds mergerfs entry to /etc/fstab (union of /mnt/d1, /mnt/d2, ... → /mnt/tank)
+#   - Exports /mnt/tank over NFS to LAN + k3s pod CIDR + tailnet
+#   - Configures the Samba "family" share with vfs_fruit + recycle-bin VFS
+#   - Configures a Samba "timemachine" share + avahi Bonjour record so Macs
+#     auto-discover it under System Settings → Time Machine → Add Backup Disk
+#   - Installs cron: nightly snapraid sync, weekly partial scrub
+#
+# What it does NOT do:
+#   - Format the drives. Partition + mkfs.ext4 are intentionally manual the
+#     first time — too dangerous to automate "find a 26 TB blank disk and wipe it".
+#     The initial setup happened by hand on 2026-06-25; see docs/bulk-storage.md.
+#   - Set Samba passwords. Run `sudo smbpasswd -a <user>` on the node once per user
+#     (interactive — the password is prompted, not stored in this repo).
+#   - Migrate existing data off the older rpi-control:/mnt/nfs tier.
+#
+# To add a new family member (mom/wife/kid/etc.) to the SMB share:
+#   1. Edit `ansible/host_vars/rpi-node4.yml` and add their name to `samba_users`.
+#   2. cd ansible && ansible-playbook playbooks/tank.yml --ask-become-pass
+#      (creates the Linux user + updates smb.conf valid_users)
+#   3. ssh victord@192.168.4.32
+#      sudo smbpasswd -a <newname>     # prompts twice for their SMB password
+#   4. Have them mount smb://192.168.4.32/family from Finder (⌘K) on their Mac.
+#
+# To use Time Machine from a Mac:
+#   1. Make sure that Mac's user is in `samba_users` (above) and has a smbpasswd set.
+#   2. System Settings → General → Time Machine → Add Backup Disk…
+#      "rpi-node4" should appear automatically (advertised via Bonjour/avahi).
+#      Pick the "timemachine" share, authenticate as your samba_users name.
+#   3. First backup pulls everything, subsequent backups are hourly + incremental.
+#   Per-Mac cap is `tank_timemachine_max_size` (default 2T) — sparsebundles
+#   live at /mnt/tank/backups/timemachine/<machine>.sparsebundle.
+#
+# To add a new data drive later (4th drive, etc.):
+#   1. Plug it into the DAS, partition + format, mount at /mnt/dN with UUID in fstab
+#   2. Append /mnt/dN to mergerfs branches in /etc/fstab and remount /mnt/tank
+#   3. Add `data dN /mnt/dN` line to /etc/snapraid.conf
+#   4. `sudo snapraid sync`
+#   (The ansible playbook will pick up new drives if you list them in tank_data_drives.)
+#
+# Run:
+#   cd ansible
+#   ansible-playbook playbooks/tank.yml --ask-become-pass
+
+- name: Bulk-storage tier (SnapRAID + mergerfs + NFS + Samba)
+  hosts: rpi-node4
+  become: true
+  vars:
+    # Data drive mountpoints. Add more as drives arrive.
+    tank_data_drives:
+      - /mnt/d1
+    tank_parity: /mnt/parity1/snapraid.parity
+    tank_pool: /mnt/tank
+    # Subdir layout. The `family` dir is owned by the shared `family` user/group
+    # (matches `force user/group = family` in smb.conf) with setgid so new files
+    # inherit the family group regardless of who created them.
+    tank_subdirs:
+      - { path: family,                owner: family, group: family, mode: "2775" }
+      - { path: photos,                owner: victord, group: victord, mode: "0775" }
+      - { path: media,                 owner: victord, group: victord, mode: "0775" }
+      - { path: backups,               owner: root,    group: root,    mode: "0755" }
+      # Setgid + group-writable so any samba_users member can create their
+      # own sparsebundle, but per-user `directory mask = 0700` keeps each
+      # bundle private to its owner.
+      - { path: backups/timemachine,   owner: root,    group: family,  mode: "2775" }
+      - { path: k8s,                   owner: root,    group: root,    mode: "0755" }
+    # Per-Mac Time Machine cap. Macs see this as the disk size; TM auto-prunes
+    # the oldest snapshots once full. Rule of thumb: ~2-3× the Mac's data size,
+    # so a 2.2 TB Mac wants ~5-6 TB to keep meaningful snapshot history. Each
+    # Mac's sparsebundle grows on demand — this is just a ceiling, not a
+    # reservation, so being generous costs nothing until backups actually fill.
+    tank_timemachine_max_size: 6T
+    # Subnets allowed to mount NFS — matches rpi-control export config
+    nfs_allowed_cidrs:
+      - 192.168.4.0/22   # LAN
+      - 10.42.0.0/16     # k3s pod network
+      - 100.64.0.0/10    # tailnet
+    # samba_users comes from host_vars/rpi-node4.yml so adding a family member
+    # is one line of data in one file, not a playbook edit.
+
+  tasks:
+    - name: Install storage + sharing packages
+      ansible.builtin.apt:
+        name:
+          - snapraid
+          - mergerfs
+          - nfs-kernel-server
+          - samba
+          - samba-common-bin
+          # avahi-daemon advertises the SMB share + Time Machine record over
+          # Bonjour so Macs find rpi-node4 in Finder sidebar and Time Machine
+          # destination picker without needing a manual smb:// address.
+          - avahi-daemon
+        state: present
+        update_cache: true
+        lock_timeout: 600
+
+    - name: Ensure shared `family` group exists (owns everything in the family share)
+      ansible.builtin.group:
+        name: family
+        state: present
+
+    - name: Ensure shared `family` user exists (force_user target for the family share)
+      ansible.builtin.user:
+        name: family
+        group: family
+        shell: /usr/sbin/nologin
+        create_home: false
+        state: present
+
+    - name: Ensure SMB users exist as no-login Unix users in the family group
+      ansible.builtin.user:
+        name: "{{ item }}"
+        shell: /usr/sbin/nologin
+        create_home: false
+        groups: family
+        append: true
+        state: present
+      # Skip the ansible_user (victord) — they already have a real login shell
+      # and we don't want to clobber it. They get added to `family` group below.
+      loop: "{{ samba_users | difference([ansible_user]) }}"
+
+    - name: Ensure ansible_user is also in the family group (without changing their shell)
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: family
+        append: true
+        state: present
+      when: ansible_user in samba_users
+
+    - name: Ensure pool root exists
+      ansible.builtin.file:
+        path: "{{ tank_pool }}"
+        state: directory
+        mode: "0755"
+
+    - name: Ensure subdirectories exist with correct ownership
+      ansible.builtin.file:
+        path: "{{ tank_pool }}/{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop: "{{ tank_subdirs }}"
+
+    - name: Ensure /var/snapraid exists for off-pool content file
+      ansible.builtin.file:
+        path: /var/snapraid
+        state: directory
+        mode: "0755"
+
+    - name: Write /etc/snapraid.conf
+      ansible.builtin.copy:
+        dest: /etc/snapraid.conf
+        mode: "0644"
+        content: |
+          # Managed by ansible/playbooks/tank.yml — edits will be overwritten.
+          parity {{ tank_parity }}
+
+          # Off-pool copy survives loss of all data drives
+          content /var/snapraid/snapraid.content
+          {% for d in tank_data_drives %}
+          content {{ d }}/.snapraid.content
+          {% endfor %}
+
+          {% for d in tank_data_drives %}
+          data d{{ loop.index }} {{ d }}
+          {% endfor %}
+
+          exclude *.unrecoverable
+          exclude /tmp/
+          exclude /lost+found/
+          exclude .Trash-*/
+          exclude /.snapshots/
+          exclude .DS_Store
+          exclude ._*
+          exclude /snapraid.content*
+          exclude /.snapraid.content*
+
+          # Tuning
+          blocksize 256
+          autosave 500
+
+    - name: Mount mergerfs pool at {{ tank_pool }}
+      ansible.posix.mount:
+        path: "{{ tank_pool }}"
+        src: "{{ tank_data_drives | join(':') }}"
+        fstype: fuse.mergerfs
+        # IMPORTANT: keep this all on one line, no spaces after commas. YAML's `>-`
+        # folded scalar inserts a space at every line break — that produces an
+        # opts string that doesn't match the live /etc/fstab, so ansible decides
+        # to remount /mnt/tank, which fails with "target is busy" since NFS/SMB
+        # are actively holding the pool.
+        opts: "defaults,allow_other,use_ino,cache.files=partial,moveonenospc=true,category.create=mfs,minfreespace=200G,fsname=mergerfs:tank,x-systemd.requires={{ tank_data_drives | first }}"
+        state: mounted
+
+    - name: Export {{ tank_pool }} over NFS
+      ansible.builtin.copy:
+        dest: /etc/exports.d/tank.exports
+        mode: "0644"
+        content: |
+          # Managed by ansible/playbooks/tank.yml
+          # fsid=20 is required because /mnt/tank is mergerfs (FUSE) — kernel NFS needs an
+          # explicit ID for non-native filesystems. Pick anything not used by other exports.
+          {{ tank_pool }} {% for c in nfs_allowed_cidrs %}{{ c }}(rw,sync,no_subtree_check,no_root_squash,fsid=20) {% endfor %}
+      notify: reload nfs exports
+
+    - name: Ensure nfs-server is enabled and running
+      ansible.builtin.systemd:
+        name: nfs-server
+        state: started
+        enabled: true
+
+    - name: Configure Samba (smb.conf with macOS-friendly options + recycle bin)
+      ansible.builtin.copy:
+        dest: /etc/samba/smb.conf
+        mode: "0644"
+        backup: true
+        content: |
+          # Managed by ansible/playbooks/tank.yml
+          [global]
+              workgroup = WORKGROUP
+              server string = rpi-node4 family storage
+              server role = standalone server
+              security = user
+              map to guest = never
+              log file = /var/log/samba/log.%m
+              max log size = 1000
+              # macOS / iOS friendliness
+              fruit:aapl = yes
+              fruit:metadata = stream
+              fruit:model = MacSamba
+              fruit:posix_rename = yes
+              fruit:veto_appledouble = no
+              fruit:wipe_intentionally_left_blank_rfork = yes
+              fruit:delete_empty_adfiles = yes
+              # Speed
+              socket options = TCP_NODELAY IPTOS_LOWDELAY
+              # No printer sharing
+              load printers = no
+              printing = bsd
+              printcap name = /dev/null
+              disable spoolss = yes
+
+          [family]
+              comment = Family files (Macs + iPhones welcome)
+              path = {{ tank_pool }}/family
+              browseable = yes
+              read only = no
+              guest ok = no
+              valid users = {{ samba_users | join(' ') }}
+              force user = family
+              force group = family
+              create mask = 0664
+              directory mask = 0775
+              # macOS support + recycle bin (deleted files go to .recycle/, never actually deleted)
+              vfs objects = catia fruit streams_xattr recycle
+              recycle:repository = .recycle/%U
+              recycle:keeptree = yes
+              recycle:versions = yes
+              recycle:touch = yes
+              recycle:directory_mode = 0775
+              recycle:subdir_mode = 0775
+              recycle:exclude = *.tmp *.temp ~$*
+              recycle:exclude_dir = /tmp /.cache
+              recycle:maxsize = 1073741824
+
+          [timemachine]
+              comment = Time Machine backups
+              path = {{ tank_pool }}/backups/timemachine
+              browseable = yes
+              read only = no
+              guest ok = no
+              valid users = {{ samba_users | join(' ') }}
+              # No force user/group: each Mac's sparsebundle is owned by the
+              # connecting user, mode 0700, so family members can't read each
+              # other's backups even though they share the directory.
+              create mask = 0600
+              directory mask = 0700
+              # vfs_fruit is what makes this a TM-capable share. `recycle` is
+              # deliberately omitted — TM manages its own snapshot lifecycle and
+              # the recycle bin would double-store deletions.
+              vfs objects = catia fruit streams_xattr
+              fruit:time machine = yes
+              fruit:time machine max size = {{ tank_timemachine_max_size }}
+      notify: restart samba
+
+    - name: Ensure smbd + nmbd are running
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop: [smbd, nmbd]
+
+    - name: Write avahi service record (advertise SMB + Time Machine over Bonjour)
+      ansible.builtin.copy:
+        dest: /etc/avahi/services/samba.service
+        mode: "0644"
+        # dk0=adVN=timemachine must match the smb.conf share name exactly,
+        # otherwise macOS sees the host but the destination picker is empty.
+        # adVF=0x82 = visible + supports TM. model=TimeCapsule8,119 makes
+        # Finder draw the share with the Time Capsule icon.
+        content: |
+          <?xml version="1.0" standalone='no'?>
+          <!DOCTYPE service-group SYSTEM "avahi.dtd">
+          <service-group>
+            <name replace-wildcards="yes">%h</name>
+            <service>
+              <type>_smb._tcp</type>
+              <port>445</port>
+            </service>
+            <service>
+              <type>_device-info._tcp</type>
+              <port>0</port>
+              <txt-record>model=TimeCapsule8,119</txt-record>
+            </service>
+            <service>
+              <type>_adisk._tcp</type>
+              <port>9</port>
+              <txt-record>sys=waMa=0,adVF=0x100</txt-record>
+              <txt-record>dk0=adVN=timemachine,adVF=0x82</txt-record>
+            </service>
+          </service-group>
+      notify: restart avahi
+
+    - name: Ensure avahi-daemon is running
+      ansible.builtin.systemd:
+        name: avahi-daemon
+        state: started
+        enabled: true
+
+    - name: Install snapraid cron (nightly sync + weekly partial scrub)
+      ansible.builtin.copy:
+        dest: /etc/cron.d/snapraid
+        mode: "0644"
+        content: |
+          # Managed by ansible/playbooks/tank.yml
+          # Nightly sync at 02:00 — recompute parity for new/changed files
+          0 2 * * * root /usr/bin/snapraid sync 2>&1 | /usr/bin/logger -t snapraid-sync
+          # Weekly partial scrub Sun 03:00 — 8% of blocks/week, min age 14d
+          # Covers full array every ~12 weeks, detects bitrot
+          0 3 * * 0 root /usr/bin/snapraid scrub -p 8 -o 14 2>&1 | /usr/bin/logger -t snapraid-scrub
+
+    - name: Reminder about Samba passwords for any new users
+      ansible.builtin.debug:
+        msg: |
+          SMB users in `samba_users` exist as Linux accounts now, but each one
+          needs a Samba password set before they can connect. Run on the node:
+            {% for u in samba_users %}sudo smbpasswd -a {{ u }}
+            {% endfor %}
+          Then test from a Mac: Finder → ⌘K → smb://192.168.4.32/family
+
+  handlers:
+    - name: reload nfs exports
+      ansible.builtin.command: exportfs -ra
+
+    - name: restart samba
+      ansible.builtin.systemd:
+        name: smbd
+        state: restarted
+
+    - name: restart avahi
+      ansible.builtin.systemd:
+        name: avahi-daemon
+        state: restarted

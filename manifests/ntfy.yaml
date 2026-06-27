@@ -1,0 +1,156 @@
+---
+# ntfy — simple HTTP-based pub/sub for phone push notifications.
+# Producers POST to a topic URL; subscribers (phone app, browser, curl) get
+# pushed. Free, no account, end-to-end optional. Common producers on this
+# cluster: Home Assistant alerts, Frigate motion events, Immich backup
+# failures, claude-worker / trialday-builder job status.
+#
+# First-time setup:
+#   1. Apply manifest:
+#        kubectl apply -f manifests/ntfy.yaml
+#        kubectl apply -f manifests/ntfy-tailscale.yaml
+#
+#   2. Create the admin user (interactive prompt for password):
+#        kubectl -n ntfy exec -it deploy/ntfy -- \
+#          ntfy user add --role=admin admin
+#
+#   3. Grant publish/subscribe on a topic to that admin (or create more users):
+#        kubectl -n ntfy exec -it deploy/ntfy -- \
+#          ntfy access admin "*" rw
+#
+#   4. Install the ntfy app (Android/iOS), add server
+#      https://ntfy.bluebuck-micro.ts.net, log in as admin, subscribe to a
+#      topic (e.g. `home-alerts`).
+#
+# Send a test from your laptop (on Tailscale):
+#   curl -u admin:PASSWORD \
+#     -d "hello from the cluster" \
+#     https://ntfy.bluebuck-micro.ts.net/home-alerts
+#
+# Wire Home Assistant (configuration.yaml):
+#   notify:
+#     - name: ntfy
+#       platform: rest
+#       resource: https://ntfy.bluebuck-micro.ts.net/home-alerts
+#       method: POST_JSON
+#       authentication: basic
+#       username: !secret ntfy_user
+#       password: !secret ntfy_pass
+#
+# Topic convention: <area>-<purpose>
+#   home-alerts, frigate-events, backup-status, claude-jobs
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ntfy
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ntfy-config
+  namespace: ntfy
+data:
+  server.yml: |
+    base-url: "https://ntfy.bluebuck-micro.ts.net"
+    listen-http: ":80"
+    cache-file: "/var/cache/ntfy/cache.db"
+    cache-duration: "12h"
+    auth-file: "/var/lib/ntfy/user.db"
+    auth-default-access: "deny-all"
+    behind-proxy: true
+    attachment-cache-dir: "/var/cache/ntfy/attachments"
+    attachment-total-size-limit: "1G"
+    attachment-file-size-limit: "15M"
+    keepalive-interval: "45s"
+    log-level: "INFO"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ntfy-data
+  namespace: ntfy
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ntfy-cache
+  namespace: ntfy
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ntfy
+  namespace: ntfy
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ntfy
+  template:
+    metadata:
+      labels:
+        app: ntfy
+    spec:
+      containers:
+        - name: ntfy
+          image: binwiederhier/ntfy:v2.11.0
+          args: ["serve"]
+          ports:
+            - { containerPort: 80, name: http }
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ntfy/server.yml
+              subPath: server.yml
+            - name: data
+              mountPath: /var/lib/ntfy
+            - name: cache
+              mountPath: /var/cache/ntfy
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "32Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      volumes:
+        - name: config
+          configMap:
+            name: ntfy-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: ntfy-data
+        - name: cache
+          persistentVolumeClaim:
+            claimName: ntfy-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ntfy
+  namespace: ntfy
+spec:
+  selector:
+    app: ntfy
+  ports:
+    - { name: http, port: 80, targetPort: 80 }

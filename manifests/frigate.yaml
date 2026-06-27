@@ -15,8 +15,10 @@
 #   ssh victord@rpi-node2 'sudo lsusb | grep -i google'  # confirm visible
 #   kubectl label node rpi-node2 hardware/coral=true
 #
-# This manifest ships with NO cameras configured — once cameras exist, edit
-# the ConfigMap to add them under the `cameras:` block. See frigate.video/docs.
+# Cameras currently configured:
+#   - family_guardian: Reolink RLC-510A @ 192.168.4.123 (5MP H.264, no AI accel)
+#     Detect on 640x480 substream @ 5fps; record on 2560x1920 mainstream @ 30fps.
+#     Password lives in the `frigate-camera-creds` Secret below; rotate there.
 ---
 apiVersion: v1
 kind: Namespace
@@ -41,23 +43,50 @@ data:
       #   device: usb
     record:
       enabled: true
-      retain:
-        days: 7
-        mode: motion
+      alerts:
+        retain:
+          days: 7
+          mode: motion
+      detections:
+        retain:
+          days: 7
+          mode: motion
     snapshots:
       enabled: true
       retain:
         default: 14
-    cameras: {}   # <-- ADD CAMERAS HERE, e.g.:
-      # frontdoor:
-      #   ffmpeg:
-      #     inputs:
-      #       - path: rtsp://user:pass@192.168.4.50:554/cam/realmonitor?channel=1&subtype=0
-      #         roles: [detect, record]
-      #   detect:
-      #     width: 1280
-      #     height: 720
-      #     fps: 5
+    ffmpeg:
+      # Pi 5 has hardware H.264 decode via v4l2_m2m, but Frigate's CPU detector
+      # works on already-decoded frames so the gain is small for 1 camera at
+      # 640x480/5fps. Leave default decoder; revisit if adding more cameras.
+      hwaccel_args: []
+    cameras:
+      family_guardian:
+        ffmpeg:
+          inputs:
+            - path: rtsp://admin:{FRIGATE_RTSP_PASSWORD}@192.168.4.123:554/h264Preview_01_sub
+              input_args: preset-rtsp-generic
+              roles: [detect]
+            - path: rtsp://admin:{FRIGATE_RTSP_PASSWORD}@192.168.4.123:554/h264Preview_01_main
+              input_args: preset-rtsp-generic
+              roles: [record]
+        detect:
+          width: 640
+          height: 480
+          fps: 5
+        objects:
+          track: [person, car, dog, cat]
+---
+# Camera RTSP passwords. Referenced from the Deployment's env block and
+# substituted into the ConfigMap via Frigate's {FRIGATE_*} env-var syntax.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: frigate-camera-creds
+  namespace: frigate
+type: Opaque
+stringData:
+  rtsp_password: Sports22
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -96,13 +125,27 @@ spec:
       labels: { app: frigate }
     spec:
       # nodeSelector: { hardware/coral: "true" }   # once Coral is attached
+      # Avoid rpi-node4: longhorn-engine SIGSEGVs on that node, every PVC
+      # scheduled there gets stuck attaching. Remove once rpi-node4 is fixed.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: [rpi-node4]
       containers:
         - name: frigate
           image: ghcr.io/blakeblackshear/frigate:stable
           securityContext:
             privileged: true     # needed for /dev/bus/usb passthrough (Coral)
           env:
-            - { name: FRIGATE_RTSP_PASSWORD, value: change_me }
+            - name: FRIGATE_RTSP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: frigate-camera-creds
+                  key: rtsp_password
           ports:
             - { name: web,  containerPort: 5000 }
             - { name: rtsp, containerPort: 8554 }

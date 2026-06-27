@@ -1,0 +1,140 @@
+---
+# cluster-health — daily kubectl get pods/nodes, write a snapshot to NFS,
+# fail the job (visible in `kubectl get cronjobs.batch -A`) when anything
+# is not Ready/Running.
+#
+# Schedule: 12:00 UTC daily = 8:00 EDT / 5:00 PDT.
+# Output:   /mnt/nfs/reports/cluster-health/YYYY-MM-DD.txt
+#           Browsable at https://files.192.168.4.27.nip.io/reports/cluster-health/
+#           (behind Authelia, same as the rest of the file server.)
+#
+# To list recent runs:
+#   kubectl -n cluster-health get jobs --sort-by=.metadata.creationTimestamp
+# To see the latest report quickly:
+#   kubectl -n cluster-health logs -l job-name=$(kubectl -n cluster-health \
+#     get jobs --sort-by=.metadata.creationTimestamp -o name | tail -1 | cut -d/ -f2)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cluster-health
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-health
+  namespace: cluster-health
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-health-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-health-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-health-reader
+subjects:
+  - kind: ServiceAccount
+    name: cluster-health
+    namespace: cluster-health
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: check-script
+  namespace: cluster-health
+data:
+  check.sh: |
+    #!/bin/sh
+    set -eu
+    DATE=$(date -u +%Y-%m-%d)
+    TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    OUT_DIR=/mnt/nfs/reports/cluster-health
+    OUT=${OUT_DIR}/${DATE}.txt
+    mkdir -p "$OUT_DIR"
+
+    {
+      echo "# rpi-cluster health — ${TS}"
+      echo
+      echo "## nodes"
+      kubectl get nodes -o wide
+      echo
+      echo "## pods (all namespaces)"
+      kubectl get pods -A -o wide
+      echo
+      echo "## not-ok nodes"
+      kubectl get nodes --no-headers \
+        | awk '$2 != "Ready" { print }' || true
+      echo
+      echo "## not-ok pods"
+      kubectl get pods -A --no-headers \
+        | awk '$4 != "Running" && $4 != "Completed" && $4 != "Succeeded" { print }' || true
+      echo
+      echo "## recent warning events (cluster-wide, last 1h)"
+      kubectl get events -A --field-selector type=Warning \
+        --sort-by=.lastTimestamp \
+        | tail -50 || true
+    } | tee "$OUT"
+
+    # Exit non-zero if there's anything wrong — surfaces a failed Job in k8s,
+    # which is the simplest "flag" mechanism without wiring up alerting.
+    BAD_NODES=$(kubectl get nodes --no-headers | awk '$2 != "Ready"' | wc -l)
+    BAD_PODS=$(kubectl get pods -A --no-headers \
+      | awk '$4 != "Running" && $4 != "Completed" && $4 != "Succeeded"' | wc -l)
+    if [ "$BAD_NODES" -gt 0 ] || [ "$BAD_PODS" -gt 0 ]; then
+      echo "FAIL: bad_nodes=${BAD_NODES} bad_pods=${BAD_PODS}" >&2
+      exit 1
+    fi
+    echo "OK"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: health-check
+  namespace: cluster-health
+spec:
+  schedule: "0 12 * * *"            # 12:00 UTC daily = 8am EDT / 5am PDT
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 14
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 1209600   # 14d — keep pods around for `kubectl logs`
+      template:
+        spec:
+          serviceAccountName: cluster-health
+          restartPolicy: Never
+          containers:
+            - name: check
+              image: bitnami/kubectl:latest
+              command: ["/bin/sh", "/scripts/check.sh"]
+              volumeMounts:
+                - { name: script, mountPath: /scripts }
+                - { name: nfs,    mountPath: /mnt/nfs }
+              resources:
+                requests: { cpu: "50m",  memory: "64Mi" }
+                limits:   { cpu: "500m", memory: "256Mi" }
+          volumes:
+            - name: script
+              configMap:
+                name: check-script
+                defaultMode: 0755
+                items:
+                  - { key: check.sh, path: check.sh }
+            - name: nfs
+              nfs:
+                server: 192.168.4.27
+                path: /mnt/nfs

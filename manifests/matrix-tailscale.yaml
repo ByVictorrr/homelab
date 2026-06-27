@@ -1,0 +1,22 @@
+---
+# Expose Matrix (conduwuit) on Tailscale at https://matrix.bluebuck-micro.ts.net.
+# Element client connects directly to this URL — no `.well-known` delegation
+# needed because the server_name and the client-facing host are the same.
+# Federation is off (see matrix.yaml header) so 8448 stays unused.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: matrix-ts
+  namespace: matrix
+  annotations:
+    tailscale.com/hostname: "matrix"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - matrix
+  defaultBackend:
+    service:
+      name: matrix
+      port:
+        number: 80

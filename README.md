@@ -98,6 +98,24 @@ In the **eero app** → Settings → Network Settings → DHCP & NAT → Reserva
 ### Option C — real DNS via a local resolver
 If you want `rpi-control` (no `.local`, no `/etc/hosts`) to resolve from *every* device on the network, run a DNS server on the cluster (Pi-hole, AdGuard Home, unbound, dnsmasq) with A records for your Pis, then point eero at it: **eero app → Settings → Network Settings → DNS → Custom → Primary = `<pi-ip>`**. This also gets you LAN-wide ad blocking.
 
+## Storage tiers
+
+Two NFS shares back the cluster's persistent data:
+
+| Tier | Server | Path | Size | Use |
+|---|---|---|---|---|
+| `nfs-1` | rpi-control (192.168.4.27) | `/mnt/nfs` | ~900 GB | Original SSD-backed share — Jellyfin, Audiobookshelf, Frigate, http-fileserver, PXE/TFTP |
+| `nfs-tank` | rpi-node4 (192.168.4.32) | `/mnt/tank` | ~24 TB (→ 72 TB) | Bulk tier — TerraMaster D4-320U DAS, SnapRAID + mergerfs, family Samba share |
+
+`tank` is the big one for photos, media, backups, and anything that needs more
+than 900 GB. Macs/iPhones get `smb://192.168.4.32/family`. Pods bind to PVs in
+[`manifests/tank-storage.yaml`](manifests/tank-storage.yaml). Full design + ops in
+[`docs/bulk-storage.md`](docs/bulk-storage.md). For the bigger picture of all
+disks across the cluster — SD, SSD, tank — and what each is best at, see
+[`docs/storage-tiers.md`](docs/storage-tiers.md). For pulling iCloud Photo
+Libraries into the tank so Immich indexes them, see
+[`docs/icloud-backup.md`](docs/icloud-backup.md).
+
 ## Adding the 5th Pi later
 
 ```bash
