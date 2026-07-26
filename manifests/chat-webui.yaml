@@ -1,21 +1,24 @@
 ---
-# Open WebUI — ChatGPT-style frontend that talks to cloud LLMs (Claude, GPT, etc.)
-# via an OpenAI-compatible endpoint, and optionally to a local Ollama (see
-# `ollama.yaml`). SQLite + uploads live on a PVC at /app/backend/data.
-#
-# Cloud provider: defaults to OpenRouter, which exposes Claude/GPT/Llama/etc.
-# through one OpenAI-compatible API and one key. Swap OPENAI_API_BASE_URL +
-# the secret if you'd rather hit OpenAI or Anthropic directly.
+# Open WebUI — ChatGPT-style frontend backed by local Ollama (RTX 3060) + Claude API.
+# Supports image and document uploads in chat (drag-and-drop or paperclip icon).
 #
 # First-time setup:
-#   1. kubectl apply -f manifests/chat-webui.yaml
-#   2. Put the real key in the secret:
-#        kubectl -n chat create secret generic webui-llm-keys \
-#          --from-literal=openai-api-key='sk-or-...' \
+#   1. kubectl apply -f manifests/nvidia-device-plugin.yaml
+#   2. kubectl apply -f manifests/ollama.yaml
+#   3. kubectl apply -f manifests/chat-webui.yaml
+#   4. Seed the Anthropic API key (enables Claude models + file/photo uploads):
+#        kubectl -n chat create secret generic webui-api-keys \
+#          --from-literal=anthropic-api-key="sk-ant-..." \
 #          --dry-run=client -o yaml | kubectl apply -f -
-#   3. Restart so it picks up the key: kubectl -n chat rollout restart deploy/open-webui
-#   4. Browse to http://chat.192.168.4.27.nip.io  — the first account you create
-#      becomes admin. New signups land in "pending" until you approve them.
+#        kubectl -n chat rollout restart deploy/open-webui
+#   5. Pull a local vision model for offline use (fits in RTX 3060 12GB VRAM):
+#        kubectl -n ollama exec -it deploy/ollama -- ollama pull llava:13b
+#   6. Browse to https://chat.bluebuck-micro.ts.net — first account becomes admin.
+#
+# Photo / file uploads:
+#   - Images: any vision model (Claude Sonnet, llava:13b). Drag image into chat.
+#   - Documents (PDF, text, code): any model via RAG. Paperclip icon in chat.
+#   - Claude Sonnet 4.6 is the best for mixed image+document reasoning.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -32,18 +35,6 @@ spec:
   resources:
     requests:
       storage: 10Gi
----
-# Placeholder so the Deployment can start; replace the value with `kubectl create
-# secret ... --dry-run -o yaml | kubectl apply -f -` (see header). Never commit
-# the real key.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: webui-llm-keys
-  namespace: chat
-type: Opaque
-stringData:
-  openai-api-key: "REPLACE_ME"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -68,15 +59,6 @@ spec:
           ports:
             - containerPort: 8080
           env:
-            - name: OPENAI_API_BASE_URL
-              value: "https://openrouter.ai/api/v1"
-            - name: OPENAI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: webui-llm-keys
-                  key: openai-api-key
-            # Talk to the in-cluster Ollama if it's deployed. Harmless if not —
-            # the model dropdown just shows no Ollama models.
             - name: OLLAMA_BASE_URL
               value: "http://ollama.ollama.svc.cluster.local:11434"
             - name: WEBUI_AUTH
@@ -87,6 +69,17 @@ spec:
               value: "pending"
             - name: ENABLE_SIGNUP
               value: "True"
+            # Claude API — enables claude-sonnet-4-6 / claude-opus-4-7 in the model
+            # picker with native image + document upload support. Seed the key:
+            #   kubectl -n chat create secret generic webui-api-keys \
+            #     --from-literal=anthropic-api-key="sk-ant-..." \
+            #     --dry-run=client -o yaml | kubectl apply -f -
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: webui-api-keys
+                  key: anthropic-api-key
+                  optional: true
           volumeMounts:
             - name: data
               mountPath: /app/backend/data

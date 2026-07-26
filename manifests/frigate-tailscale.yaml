@@ -1,0 +1,23 @@
+---
+# Expose Frigate NVR at https://frigate.bluebuck-micro.ts.net.
+# The LAN ingress (frigate.yaml) sits behind Authelia; the Tailscale ingress
+# is accessible to anyone on the tailnet — restrict further with Authelia if
+# you add family members to your tailnet.
+# Prereq: Tailscale operator installed (site.yml --tags llm-tailscale).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frigate-ts
+  namespace: frigate
+  annotations:
+    tailscale.com/hostname: "frigate"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - frigate
+  defaultBackend:
+    service:
+      name: frigate
+      port:
+        number: 80

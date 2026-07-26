@@ -1,0 +1,29 @@
+---
+# Expose JupyterLab at https://jupyter.bluebuck-micro.ts.net.
+# The token is still required at first load — get it with:
+#   kubectl -n jupyter logs deploy/jupyter | grep 'token='
+# Or set a persistent password via Settings → Security → Change Password once logged in.
+# Prereq: Tailscale operator installed (site.yml --tags llm-tailscale).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jupyter-ts
+  namespace: jupyter
+  annotations:
+    tailscale.com/hostname: "jupyter"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - jupyter
+  rules:
+    - host: jupyter
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: jupyter
+                port:
+                  number: 80

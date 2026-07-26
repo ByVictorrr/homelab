@@ -1,0 +1,26 @@
+---
+# Expose Forgejo at https://git.bluebuck-micro.ts.net.
+# SSH cloning still works via NodePort 30022 on any node LAN IP.
+# Note: the FORGEJO__server__ROOT_URL in forgejo.yaml is set to the nip.io
+# LAN URL — clone URLs shown in the UI will reference that host, not the
+# tailscale URL.  To flip the primary URL to Tailscale, update those two env
+# vars in forgejo.yaml and roll the deployment.
+# Prereq: Tailscale operator installed (site.yml --tags llm-tailscale).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: forgejo-ts
+  namespace: forgejo
+  annotations:
+    tailscale.com/hostname: "git"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - git
+  defaultBackend:
+    service:
+      name: forgejo
+      port:
+        number: 80
