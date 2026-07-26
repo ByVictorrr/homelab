@@ -1,0 +1,15 @@
+---
+# Per-host variables for rpi-zero (192.168.4.47, hostname: rpi-zero).
+# Raspberry Pi Zero 2W — rack-manager daemon (fan control, temp, UPS notifications).
+#
+# ── Hardware ──────────────────────────────────────────────────────────────────
+#   Board  : Raspberry Pi Zero 2W (arm64)
+#   GPIO 4 : 1-Wire bus (two DS18B20 temperature sensors)
+#   GPIO 12: PWM0 — top fan (NF-A12x25 exhaust)
+#   GPIO 13: PWM1 — bottom fan (NF-F12 intake)
+#   GPIO 27: tach — top fan
+#   GPIO 22: tach — bottom fan
+#
+# ── DS18B20 sensor IDs (confirmed 2026-07-22 via identify_sensor.py) ─────────
+rack_manager_top_sensor_id: "28-0000002225c7"
+rack_manager_bottom_sensor_id: "28-000000231462"

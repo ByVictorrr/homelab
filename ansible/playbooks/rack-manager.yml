@@ -1,0 +1,145 @@
+---
+# Deploy rack-manager daemon to the Pi Zero.
+#
+# Syncs the rack-manager submodule from this repo, installs it into a venv,
+# templates the config from vault/inventory vars, and manages the systemd service.
+#
+# Prerequisites (one-time, on your laptop):
+#   git clone --recurse-submodules git@github.com:ByVictorrr/rpi-cluster.git
+#   ansible-galaxy collection install ansible.posix
+#
+# Run:
+#   cd ansible
+#   ansible-playbook playbooks/rack-manager.yml
+#
+# Tags:
+#   sync     — rsync source code only
+#   install  — venv + pip install only
+#   config   — template config.yaml only
+#   service  — systemd unit only
+#   overlays — /boot/firmware/config.txt overlays only (reboot required after)
+
+- name: Deploy rack-manager to Pi Zero
+  hosts: rack_manager
+  become: true
+  gather_facts: true
+  vars:
+    src_dir: "{{ playbook_dir }}/../../rack-manager"
+    dest_src: /opt/rack-manager-src
+    dest: /opt/rack-manager
+    service_name: rack-manager.service
+
+  tasks:
+    - name: Install system dependencies
+      ansible.builtin.apt:
+        name: [python3, python3-venv, python3-pip, rsync]
+        state: present
+        update_cache: true
+
+    - name: Sync rack-manager source to Pi Zero
+      tags: [sync]
+      ansible.posix.synchronize:
+        src: "{{ src_dir }}/"
+        dest: "{{ dest_src }}/"
+        delete: true
+        rsync_opts:
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+          - "--exclude=.git"
+          - "--exclude=.gitignore"
+          - "--exclude=test_*.py"
+          - "--exclude=*.fzz"
+          - "--exclude=*.fzpz"
+          - "--exclude=*.svg"
+          - "--exclude=*.png"
+          - "--exclude=*.pdf"
+      notify: reinstall and restart
+
+    - name: Create install directory
+      ansible.builtin.file:
+        path: "{{ dest }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Create virtualenv
+      tags: [install]
+      ansible.builtin.command: python3 -m venv {{ dest }}/venv
+      args:
+        creates: "{{ dest }}/venv/bin/python"
+
+    - name: Install rack-manager package into venv
+      tags: [install]
+      ansible.builtin.pip:
+        name: "{{ dest_src }}"
+        virtualenv: "{{ dest }}/venv"
+        state: latest
+      notify: restart rack-manager
+
+    - name: Deploy config.yaml from template
+      tags: [config]
+      ansible.builtin.template:
+        src: rack-manager-config.yaml.j2
+        dest: "{{ dest }}/config.yaml"
+        owner: root
+        group: root
+        mode: "0640"
+      notify: restart rack-manager
+
+    - name: Install systemd service unit
+      tags: [service]
+      ansible.builtin.copy:
+        src: "{{ dest_src }}/rack-manager.service"
+        dest: /etc/systemd/system/{{ service_name }}
+        owner: root
+        group: root
+        mode: "0644"
+        remote_src: false
+      notify: restart rack-manager
+
+    - name: Enable and start rack-manager
+      tags: [service]
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Enable 1-Wire overlay on GPIO 4
+      tags: [overlays]
+      ansible.builtin.lineinfile:
+        path: /boot/firmware/config.txt
+        regexp: "^#?dtoverlay=w1-gpio"
+        line: "dtoverlay=w1-gpio,gpiopin=4"
+        state: present
+      notify: reboot required
+
+    - name: Enable dual-channel PWM overlay (GPIO 12 + 13)
+      tags: [overlays]
+      ansible.builtin.lineinfile:
+        path: /boot/firmware/config.txt
+        regexp: "^#?dtoverlay=pwm"
+        line: "dtoverlay=pwm-2chan,pin=12,func=4,pin2=13,func2=4"
+        state: present
+      notify: reboot required
+
+  handlers:
+    - name: reinstall and restart
+      ansible.builtin.pip:
+        name: "{{ dest_src }}"
+        virtualenv: "{{ dest }}/venv"
+        state: latest
+      notify: restart rack-manager
+
+    - name: restart rack-manager
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        state: restarted
+        daemon_reload: true
+
+    - name: reboot required
+      ansible.builtin.debug:
+        msg: >-
+          /boot/firmware/config.txt changed — reboot rpi-zero to activate overlay changes:
+          ssh pi@rpi-zero 'sudo reboot'

@@ -41,3 +41,14 @@ ollama_models: []
 # the Tailscale Ingress later once the operator is up).
 tailscale_oauth_client_id: ""
 tailscale_oauth_client_secret: ""
+
+# UPS (NUT — Network UPS Tools)
+# ubuntu-server owns the USB connection to the CyberPower PR1500LCDRT2U.
+# All k3s nodes monitor it as NUT SECONDARY clients.
+ups_device_name: cyberpower                           # NUT UPS identifier (used in upsc, upsmon, etc.)
+ups_server_host: "{{ hostvars['ubuntu-server'].ansible_host }}"   # 192.168.4.24
+ups_upsmon_password: "{{ vault_ups_upsmon_password }}"  # set in group_vars/all/vault.yml
+# ntfy bearer token — used by the Pi Zero rack-manager to push UPS events to the phone.
+# Add `vault_ntfy_token: tk_ai0qlzxr3o02yctj5kdgpfh01payo` to vault.yml.
+ntfy_url: "https://ntfy.bluebuck-micro.ts.net"
+ntfy_token: "{{ vault_ntfy_token }}"

@@ -1,0 +1,3 @@
+[submodule "rack-manager"]
+	path = rack-manager
+	url = git@github.com:ByVictorrr/pi-zero-rack-manager.git

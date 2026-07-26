@@ -1,0 +1,55 @@
+temp:
+  high_threshold_c: 45
+  critical_threshold_c: 60
+  hysteresis_c: 3
+  poll_interval_s: 5
+
+ups:
+  enabled: true
+  host: {{ ups_server_host }}   # ubuntu-server runs the NUT PRIMARY (USB is there)
+  port: 3493
+  name: {{ ups_device_name }}
+  onbatt_shutdown_delay_s: 90
+  poll_interval_s: 10
+
+ntfy:
+  url: {{ ntfy_url }}
+  token: {{ ntfy_token }}
+  topics:
+    critical: homelab-critical
+    admin: homelab-admin
+
+cluster:
+  kubectl_node:
+    name: {{ groups['k3s_server'][0] }}
+    host: {{ hostvars[groups['k3s_server'][0]].ansible_host }}
+    user: {{ hostvars[groups['k3s_server'][0]].ansible_user | default('victord') }}
+  nodes:
+{% for host in groups['k3s_cluster'] %}
+    - name: {{ host }}
+      host: {{ hostvars[host].ansible_host }}
+      user: {{ hostvars[host].ansible_user | default('victord') }}
+      k8s_role: {{ 'control' if host in groups['k3s_server'] else 'agent' }}
+{% if host == 'ubuntu-server' %}
+      shutdown_last: true
+{% endif %}
+{% endfor %}
+
+metrics:
+  enabled: true
+  pushgateway_url: http://{{ hostvars[groups['k3s_server'][0]].ansible_host }}:30091
+
+fans:
+  enabled: true
+  temp_min_c: 35
+  temp_max_c: 55
+  top:
+    pwm_pin: 12
+    tach_pin: 27
+    min_percent: 40
+    sensor_id: "{{ rack_manager_top_sensor_id }}"
+  bottom:
+    pwm_pin: 13
+    tach_pin: 22
+    min_percent: 30
+    sensor_id: "{{ rack_manager_bottom_sensor_id }}"
