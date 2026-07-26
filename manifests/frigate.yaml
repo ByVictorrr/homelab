@@ -1,24 +1,50 @@
 ---
 # Frigate — NVR with AI object detection.
 #
-# REQUIRES (in this order of importance):
-#   1. RTSP camera(s). Cheap ones: Reolink RLC-510A, Amcrest ASH21-W, Tapo C200.
-#   2. A Google Coral USB Accelerator (~$60). Without it, CPU detection on
-#      Pi 5 caps at ~5fps for 1 camera and burns a full core. With it: 6+
-#      cameras at <10ms inference.
-#   3. Storage. Recordings eat ~10GB/camera/day at 1080p; mount NFS-backed
-#      PVC if you want >a week of retention.
+# Runs on delaplaine-server (RTX 3060) for TensorRT inference: ~1ms/frame,
+# handles 10+ cameras at 10fps detection each. NVDEC hardware decodes H.264/H.265.
 #
-# Add the Coral device to a node, then this manifest pins Frigate to that
-# node + mounts /dev/bus/usb so the Coral is visible inside the pod:
-#   nodeSelector: { hardware/coral: "true" }
-#   ssh victord@rpi-node2 'sudo lsusb | grep -i google'  # confirm visible
-#   kubectl label node rpi-node2 hardware/coral=true
+# ── Detector choices (pick one, set in the detectors block below) ───────────
+#   tensorrt   RTX 3060 — 100+ fps, <2ms. Best option. (this default)
+#   edgetpu    Google Coral USB (~$60) — ~30ms, 6 cameras, works on any node.
+#   cpu        Fallback only. ~5fps for 1 camera, burns a whole core.
 #
-# Cameras currently configured:
-#   - family_guardian: Reolink RLC-510A @ 192.168.4.123 (5MP H.264, no AI accel)
-#     Detect on 640x480 substream @ 5fps; record on 2560x1920 mainstream @ 30fps.
-#     Password lives in the `frigate-camera-creds` Secret below; rotate there.
+# ── Specialty models (layered on top of base object detection) ───────────────
+#   License plates  → fast-plate-ocr sidecar (see below)
+#   Face recognition → Double-Take service + CompreFace (offline)
+#                      deploy: kubectl apply -f manifests/double-take.yaml  (TBD)
+#   Custom objects  → train YOLOv8, export:
+#                      yolo export model=best.pt format=engine device=0
+#                      copy .engine to /config/model_cache/ on the PVC
+#
+# ── Add a camera ─────────────────────────────────────────────────────────────
+# Most cameras expose two RTSP streams:
+#   sub (detect stream): low-res (640×480 or 1280×720), low fps (5-10). USE THIS for detection.
+#   main (record stream): full resolution (1080p/4K), high fps (15-30). For recordings only.
+#
+# Common RTSP URL patterns:
+#   Reolink H.264:  rtsp://admin:{PASS}@IP:554/h264Preview_01_sub  (sub)
+#                   rtsp://admin:{PASS}@IP:554/h264Preview_01_main (main)
+#   Hikvision:      rtsp://admin:{PASS}@IP:554/Streaming/Channels/102  (sub: ch1 stream2)
+#                   rtsp://admin:{PASS}@IP:554/Streaming/Channels/101  (main: ch1 stream1)
+#   Dahua / Amcrest:rtsp://admin:{PASS}@IP:554/cam/realmonitor?channel=1&subtype=1
+#                   rtsp://admin:{PASS}@IP:554/cam/realmonitor?channel=1&subtype=0
+#   Tapo C200/C310: rtsp://user:{PASS}@IP:554/stream2  (sub)
+#                   rtsp://user:{PASS}@IP:554/stream1  (main)
+#   Wyze Cam:       doesn't expose RTSP natively; flash Wyze RTSP firmware first.
+#   ONVIF generic:  use ONVIF Device Manager (Windows/Wine) to find the URL.
+#
+# Per-camera passwords: name env vars FRIGATE_<CAMNAME>_PASSWORD and reference
+# as {FRIGATE_<CAMNAME>_PASSWORD} in the RTSP path. Add each to the Secret below.
+#
+# ── SHM sizing ───────────────────────────────────────────────────────────────
+# Rule: ~256Mi per camera at 5fps/640×480. Increase sizeLimit in the shm volume
+# and resources.limits.memory if you add cameras.
+#
+# ── Storage ──────────────────────────────────────────────────────────────────
+# Recordings → frigate-media PVC → NFS on rpi-control's SSD.
+# Budget ~10GB/camera/day at 1080p 30fps continuous; motion-only is ~1–2GB/day.
+# Current PVC: 200Gi (~20 cameras × 7-day motion-only retention).
 ---
 apiVersion: v1
 kind: Namespace
@@ -33,14 +59,38 @@ metadata:
 data:
   config.yml: |
     mqtt:
-      enabled: false   # flip to true + point at Home Assistant's mosquitto
+      enabled: false   # set true + point at Home Assistant's mosquitto once HA is up:
+      # host: mosquitto.mosquitto.svc.cluster.local
+      # port: 1883
+
     detectors:
-      # Once Coral is in: uncomment the edgetpu block and delete cpu.
-      cpu:
-        type: cpu
+      tensorrt:
+        type: tensorrt
+        device: 0       # GPU index (0 = first/only GPU on delaplaine-server)
+      # ── Coral USB fallback (uncomment if moving Frigate off the GPU node) ──
       # edgetpu:
       #   type: edgetpu
       #   device: usb
+
+    # TensorRT model. Frigate auto-builds the .engine on first start (~2 min).
+    # The converted file is cached in /config/model_cache/ on the config PVC.
+    # To use a custom YOLOv8 model:
+    #   1. Train: yolo train data=coco.yaml model=yolov8n.pt epochs=100
+    #   2. Export: yolo export model=best.pt format=engine device=0 imgsz=640
+    #   3. kubectl cp best.engine frigate/<pod>:/config/model_cache/tensorrt/custom.engine
+    #   4. Change path below and set labelmap_path to your label file.
+    model:
+      path: /config/model_cache/tensorrt/yolov8n-320.trt
+      input_tensor: nchw
+      input_pixel_format: rgb
+      width: 320
+      height: 320
+
+    ffmpeg:
+      # NVDEC hardware H.264/H.265 decode — offloads CPU, mandatory for 4+ cameras.
+      hwaccel_args: preset-nvidia-h264
+      # For H.265 (HEVC) cameras swap to: preset-nvidia-hevc
+
     record:
       enabled: true
       alerts:
@@ -55,12 +105,17 @@ data:
       enabled: true
       retain:
         default: 14
-    ffmpeg:
-      # Pi 5 has hardware H.264 decode via v4l2_m2m, but Frigate's CPU detector
-      # works on already-decoded frames so the gain is small for 1 camera at
-      # 640x480/5fps. Leave default decoder; revisit if adding more cameras.
-      hwaccel_args: []
+
+    # ── License plate recognition (optional sidecar) ─────────────────────────
+    # Uncomment + deploy manifests/lpr.yaml (TBD) to enable offline LPR.
+    # Frigate will POST crop images of detected cars to the LPR service.
+    # lpr:
+    #   enabled: true
+    #   url: http://fast-plate-ocr.frigate.svc.cluster.local:8080
+
     cameras:
+
+      # ── Camera 1: Reolink RLC-510A (already wired) ──────────────────────────
       family_guardian:
         ffmpeg:
           inputs:
@@ -73,12 +128,35 @@ data:
         detect:
           width: 640
           height: 480
-          fps: 5
+          fps: 10        # bumped from 5 — TensorRT handles this easily
         objects:
           track: [person, car, dog, cat]
+        # Optional: mask out static areas to cut false positives (draw in UI)
+        # motion:
+        #   mask:
+        #     - "0,0,640,120"   # top 120px (sky / timestamp overlay)
+
+      # ── Camera 2 template (copy + fill in for each new camera) ──────────────
+      # front_door:
+      #   ffmpeg:
+      #     inputs:
+      #       - path: rtsp://admin:{FRIGATE_FRONT_DOOR_PASSWORD}@192.168.4.124:554/h264Preview_01_sub
+      #         input_args: preset-rtsp-generic
+      #         roles: [detect]
+      #       - path: rtsp://admin:{FRIGATE_FRONT_DOOR_PASSWORD}@192.168.4.124:554/h264Preview_01_main
+      #         input_args: preset-rtsp-generic
+      #         roles: [record]
+      #   detect:
+      #     width: 640
+      #     height: 480
+      #     fps: 10
+      #   objects:
+      #     track: [person, car, package]
+      # ──────────────────────────────────────────────────────────────────────────
 ---
-# Camera RTSP passwords. Referenced from the Deployment's env block and
-# substituted into the ConfigMap via Frigate's {FRIGATE_*} env-var syntax.
+# Camera passwords — one key per camera that has a unique password.
+# Reference in RTSP paths as {FRIGATE_<KEY_NAME_UPPERCASED>}.
+# Add more keys here and mount them in the Deployment env block below.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -86,7 +164,8 @@ metadata:
   namespace: frigate
 type: Opaque
 stringData:
-  rtsp_password: Sports22
+  rtsp_password: Sports22          # family_guardian (Reolink RLC-510A)
+  # front_door_password: yourpass  # front_door camera — add when you add that cam
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -98,7 +177,7 @@ spec:
   storageClassName: longhorn
   resources: { requests: { storage: 2Gi } }
 ---
-# Recordings live on NFS — big, append-mostly, fine on rpi-control's SSD.
+# Recordings + snapshots on NFS (~10GB/camera/day at 1080p continuous).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -124,28 +203,35 @@ spec:
     metadata:
       labels: { app: frigate }
     spec:
-      # nodeSelector: { hardware/coral: "true" }   # once Coral is attached
-      # Avoid rpi-node4: longhorn-engine SIGSEGVs on that node, every PVC
-      # scheduled there gets stuck attaching. Remove once rpi-node4 is fixed.
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: NotIn
-                    values: [rpi-node4]
+      # Pin to the GPU node — TensorRT requires CUDA + the RTX 3060.
+      # To move Frigate to a Pi + Coral instead: remove nodeSelector +
+      # runtimeClassName, swap detector to edgetpu in the ConfigMap above.
+      nodeSelector:
+        kubernetes.io/hostname: delaplaine-server
+      runtimeClassName: nvidia
+      securityContext:
+        supplementalGroups: [44, 109]   # video + render groups for GPU access
       containers:
         - name: frigate
-          image: ghcr.io/blakeblackshear/frigate:stable
+          image: ghcr.io/blakeblackshear/frigate:stable-tensorrt
           securityContext:
-            privileged: true     # needed for /dev/bus/usb passthrough (Coral)
+            privileged: true   # needed for /dev/bus/usb (Coral) and /dev/dri (GPU)
           env:
             - name: FRIGATE_RTSP_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: frigate-camera-creds
                   key: rtsp_password
+            # Add more cameras' passwords here:
+            # - name: FRIGATE_FRONT_DOOR_PASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: frigate-camera-creds
+            #       key: front_door_password
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: all
           ports:
             - { name: web,  containerPort: 5000 }
             - { name: rtsp, containerPort: 8554 }
@@ -156,8 +242,14 @@ spec:
             - { name: dev-bus-usb, mountPath: /dev/bus/usb }
             - { name: shm, mountPath: /dev/shm }
           resources:
-            requests: { cpu: "200m", memory: "512Mi" }
-            limits:   { cpu: "4",    memory: "2Gi" }
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "6"
+              memory: "8Gi"
+              nvidia.com/gpu: "1"
       volumes:
         - { name: config,    configMap: { name: frigate-config } }
         - name: configpvc
@@ -165,7 +257,8 @@ spec:
         - name: media
           persistentVolumeClaim: { claimName: frigate-media }
         - { name: dev-bus-usb, hostPath: { path: /dev/bus/usb } }
-        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 256Mi } }
+        # 256Mi per camera at 5fps/640×480. Add ~128Mi per extra camera.
+        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 512Mi } }
 ---
 apiVersion: v1
 kind: Service
@@ -175,8 +268,10 @@ metadata:
 spec:
   selector: { app: frigate }
   ports:
-    - { port: 80, targetPort: 5000 }
+    - { name: web,  port: 80,   targetPort: 5000 }
+    - { name: rtsp, port: 8554, targetPort: 8554 }
 ---
+# LAN ingress (Authelia-protected).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
