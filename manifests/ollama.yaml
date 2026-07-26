@@ -2,37 +2,67 @@
 # Ollama — local LLM runner with RTX 3060 GPU acceleration on ubuntu-server.
 # Open WebUI auto-discovers models via OLLAMA_BASE_URL (wired in chat-webui.yaml).
 #
-# RTX 3060 (12 GB VRAM): ~60 tok/s on 8B, ~35 tok/s on 13B. One model lives in
-# VRAM at a time; Ollama swaps on demand in ~2s. All models persist on the PVC.
+# RTX 3060 (12 GB VRAM): one model lives in VRAM at a time; swaps in ~2s.
+#   ~60 tok/s on 8B models  |  ~35 tok/s on 13-14B models
+#
+# Models are pulled automatically on pod start (idempotent — skips if already
+# on the PVC). First start takes 30–60 min depending on your connection.
+#
+# ── Model roster ─────────────────────────────────────────────────────────────
+#   llama3.1:8b         ~5 GB   General / family default. Fast, friendly.
+#   llava:13b           ~8 GB   Vision — drag photos into Open WebUI chat.
+#   qwen2.5-coder:14b   ~9 GB   Coding. Python, Go, k8s YAML, Ansible.
+#   llama3.2:3b         ~2 GB   Ultra-fast for quick lookups. Barely uses VRAM.
+#   phi4:14b            ~9 GB   Reasoning, math, multi-step analysis.
+#
+# ── Open WebUI quick reference ───────────────────────────────────────────────
+#   Parents / everyday   → llama3.1:8b   (set as default in Admin → Settings)
+#   Photo uploaded       → llava:13b     (auto-suggested when image is attached)
+#   Coding session       → qwen2.5-coder:14b
+#   Quick question       → llama3.2:3b
+#   Hard math/reasoning  → phi4:14b
 #
 # Prereqs:
 #   kubectl apply -f manifests/nvidia-device-plugin.yaml
-#   # confirm GPU is visible:
 #   kubectl get nodes -o json | jq '.items[].status.capacity["nvidia.com/gpu"]'
-#
-# ── Recommended model set ────────────────────────────────────────────────────
-# Pull all after first deploy (takes 10-30 min total depending on connection):
-#
-#   # General / family — fast, friendly, handles everyday Q&A + photo descriptions
-#   kubectl -n ollama exec -it deploy/ollama -- ollama pull llama3.1:8b
-#
-#   # Vision — image + photo uploads in Open WebUI (drag image into chat)
-#   kubectl -n ollama exec -it deploy/ollama -- ollama pull llava:13b
-#
-#   # Coding (for you) — best local code model; Python, Go, k8s YAML, Ansible
-#   kubectl -n ollama exec -it deploy/ollama -- ollama pull qwen2.5-coder:14b
-#
-# ── Short guide for Open WebUI ───────────────────────────────────────────────
-#   Parents / casual use  → pick llama3.1:8b  (fast, never confusing)
-#   Photo / image uploads → pick llava:13b    (drag image into the chat box)
-#   Coding help           → pick qwen2.5-coder:14b  (or Claude Sonnet via API)
-#   Document Q&A          → any model; attach PDF/text via the paperclip icon
-#
-# Models persist on the PVC across pod restarts — no re-pull needed.
+#   # should return "1" for delaplaine-server
 apiVersion: v1
 kind: Namespace
 metadata:
   name: ollama
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ollama-entrypoint
+  namespace: ollama
+data:
+  entrypoint.sh: |
+    #!/bin/sh
+    set -e
+
+    # Start Ollama API server in the background
+    ollama serve &
+    OLLAMA_PID=$!
+
+    # Wait for the API to accept connections (up to 60s)
+    echo "==> Waiting for Ollama API..."
+    for i in $(seq 1 30); do
+      curl -sf http://localhost:11434/ > /dev/null 2>&1 && break
+      sleep 2
+    done
+
+    # Pull all models — each call is idempotent: skips download if already
+    # present on the PVC and up-to-date. Re-runs after pod restart are instant.
+    echo "==> Pulling models (downloads only what's missing or outdated)..."
+    ollama pull llama3.1:8b          # general / family
+    ollama pull llava:13b            # vision — photos + images
+    ollama pull qwen2.5-coder:14b   # coding
+    ollama pull llama3.2:3b          # fast / lightweight
+    ollama pull phi4:14b             # reasoning + math
+
+    echo "==> All models ready."
+    wait "$OLLAMA_PID"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -44,7 +74,7 @@ spec:
   storageClassName: local-path
   resources:
     requests:
-      storage: 60Gi   # llama3.1:8b (~5GB) + llava:13b (~8GB) + qwen2.5-coder:14b (~9GB) + headroom
+      storage: 60Gi   # 5+8+9+2+9 GB models + headroom for future additions
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -69,16 +99,26 @@ spec:
       containers:
         - name: ollama
           image: ollama/ollama:latest
+          command: ["/bin/sh", "/entrypoint/entrypoint.sh"]
           ports:
             - containerPort: 11434
           env:
             - name: OLLAMA_HOST
               value: "0.0.0.0:11434"
             - name: OLLAMA_KEEP_ALIVE
-              value: "5m"
+              value: "10m"   # keep model in VRAM for 10 min between requests
           volumeMounts:
             - name: models
               mountPath: /root/.ollama
+            - name: entrypoint
+              mountPath: /entrypoint
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 11434
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
           resources:
             requests:
               cpu: "2"
@@ -92,6 +132,10 @@ spec:
         - name: models
           persistentVolumeClaim:
             claimName: ollama-models
+        - name: entrypoint
+          configMap:
+            name: ollama-entrypoint
+            defaultMode: 0755
 ---
 apiVersion: v1
 kind: Service
