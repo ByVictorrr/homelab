@@ -1,50 +1,48 @@
 ---
 # Frigate — NVR with AI object detection.
 #
-# Runs on delaplaine-server (RTX 3060) for TensorRT inference: ~1ms/frame,
-# handles 10+ cameras at 10fps detection each. NVDEC hardware decodes H.264/H.265.
+# ── CURRENT MODE: CPU (works on any node, no GPU setup needed) ──────────────
+# To upgrade to TensorRT (RTX 3060, 100× faster):
+#   1. Confirm Ollama is running with GPU (if Ollama works, GPU is ready):
+#        kubectl -n ollama get pods   # should show Running
+#   2. Flip the THREE blocks marked [CPU] → [GPU] below (image, nodeSelector,
+#      detectors). Search for "SWITCH TO TENSORRT" comments.
+#   3. kubectl apply -f manifests/frigate.yaml
 #
-# ── Detector choices (pick one, set in the detectors block below) ───────────
-#   tensorrt   RTX 3060 — 100+ fps, <2ms. Best option. (this default)
-#   edgetpu    Google Coral USB (~$60) — ~30ms, 6 cameras, works on any node.
-#   cpu        Fallback only. ~5fps for 1 camera, burns a whole core.
+# ── Detector options ─────────────────────────────────────────────────────────
+#   cpu        Works now. ~5fps for 1 camera. Runs on any Pi or server.
+#   tensorrt   RTX 3060 — ~1ms/frame, 10+ cameras. Needs GPU prereqs below.
+#   edgetpu    Google Coral USB (~$60) — 30ms, 6 cameras, any node.
 #
-# ── Specialty models (layered on top of base object detection) ───────────────
-#   License plates  → fast-plate-ocr sidecar (see below)
-#   Face recognition → Double-Take service + CompreFace (offline)
-#                      deploy: kubectl apply -f manifests/double-take.yaml  (TBD)
-#   Custom objects  → train YOLOv8, export:
-#                      yolo export model=best.pt format=engine device=0
-#                      copy .engine to /config/model_cache/ on the PVC
+# ── GPU prereqs (one-time on delaplaine-server, only needed for TensorRT) ───
+#   sudo apt-get install -y nvidia-container-toolkit
+#   sudo nvidia-ctk runtime configure --runtime=containerd
+#   sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+#   sudo systemctl restart k3s-agent  # or k3s if this is the control plane
+#   kubectl apply -f manifests/nvidia-device-plugin.yaml
 #
 # ── Add a camera ─────────────────────────────────────────────────────────────
 # Most cameras expose two RTSP streams:
-#   sub (detect stream): low-res (640×480 or 1280×720), low fps (5-10). USE THIS for detection.
-#   main (record stream): full resolution (1080p/4K), high fps (15-30). For recordings only.
+#   sub (detect): low-res 640×480, 5-10fps — USE THIS for detection
+#   main (record): full resolution, high fps — for recordings only
 #
 # Common RTSP URL patterns:
-#   Reolink H.264:  rtsp://admin:{PASS}@IP:554/h264Preview_01_sub  (sub)
-#                   rtsp://admin:{PASS}@IP:554/h264Preview_01_main (main)
-#   Hikvision:      rtsp://admin:{PASS}@IP:554/Streaming/Channels/102  (sub: ch1 stream2)
-#                   rtsp://admin:{PASS}@IP:554/Streaming/Channels/101  (main: ch1 stream1)
-#   Dahua / Amcrest:rtsp://admin:{PASS}@IP:554/cam/realmonitor?channel=1&subtype=1
-#                   rtsp://admin:{PASS}@IP:554/cam/realmonitor?channel=1&subtype=0
-#   Tapo C200/C310: rtsp://user:{PASS}@IP:554/stream2  (sub)
-#                   rtsp://user:{PASS}@IP:554/stream1  (main)
-#   Wyze Cam:       doesn't expose RTSP natively; flash Wyze RTSP firmware first.
-#   ONVIF generic:  use ONVIF Device Manager (Windows/Wine) to find the URL.
+#   Reolink H.264:   rtsp://admin:{PASS}@IP:554/h264Preview_01_sub   (sub)
+#                    rtsp://admin:{PASS}@IP:554/h264Preview_01_main  (main)
+#   Hikvision:       rtsp://admin:{PASS}@IP:554/Streaming/Channels/102  (sub)
+#                    rtsp://admin:{PASS}@IP:554/Streaming/Channels/101  (main)
+#   Dahua/Amcrest:   rtsp://admin:{PASS}@IP:554/cam/realmonitor?channel=1&subtype=1
+#   Tapo C200/C310:  rtsp://user:{PASS}@IP:554/stream2  (sub)
+#                    rtsp://user:{PASS}@IP:554/stream1  (main)
 #
-# Per-camera passwords: name env vars FRIGATE_<CAMNAME>_PASSWORD and reference
-# as {FRIGATE_<CAMNAME>_PASSWORD} in the RTSP path. Add each to the Secret below.
+# Per-camera passwords: name env vars FRIGATE_<CAMNAME>_PASSWORD, reference
+# as {FRIGATE_<CAMNAME>_PASSWORD} in the path. Add to the Secret below.
 #
-# ── SHM sizing ───────────────────────────────────────────────────────────────
-# Rule: ~256Mi per camera at 5fps/640×480. Increase sizeLimit in the shm volume
-# and resources.limits.memory if you add cameras.
-#
-# ── Storage ──────────────────────────────────────────────────────────────────
-# Recordings → frigate-media PVC → NFS on rpi-control's SSD.
-# Budget ~10GB/camera/day at 1080p 30fps continuous; motion-only is ~1–2GB/day.
-# Current PVC: 200Gi (~20 cameras × 7-day motion-only retention).
+# ── Specialty models (layered on top of base detection) ──────────────────────
+#   Face recognition  → Double-Take + CompreFace (deploy: manifests/double-take.yaml TBD)
+#   License plates    → fast-plate-ocr sidecar (manifests/lpr.yaml TBD)
+#   Custom YOLOv8     → train → yolo export format=engine device=0
+#                       → kubectl cp best.engine frigate/<pod>:/config/model_cache/
 ---
 apiVersion: v1
 kind: Namespace
@@ -59,37 +57,29 @@ metadata:
 data:
   config.yml: |
     mqtt:
-      enabled: false   # set true + point at Home Assistant's mosquitto once HA is up:
-      # host: mosquitto.mosquitto.svc.cluster.local
-      # port: 1883
+      enabled: false   # flip true + set host: mosquitto.mosquitto.svc.cluster.local
 
     detectors:
-      tensorrt:
-        type: tensorrt
-        device: 0       # GPU index (0 = first/only GPU on delaplaine-server)
-      # ── Coral USB fallback (uncomment if moving Frigate off the GPU node) ──
-      # edgetpu:
-      #   type: edgetpu
-      #   device: usb
-
-    # TensorRT model. Frigate auto-builds the .engine on first start (~2 min).
-    # The converted file is cached in /config/model_cache/ on the config PVC.
-    # To use a custom YOLOv8 model:
-    #   1. Train: yolo train data=coco.yaml model=yolov8n.pt epochs=100
-    #   2. Export: yolo export model=best.pt format=engine device=0 imgsz=640
-    #   3. kubectl cp best.engine frigate/<pod>:/config/model_cache/tensorrt/custom.engine
-    #   4. Change path below and set labelmap_path to your label file.
-    model:
-      path: /config/model_cache/tensorrt/yolov8n-320.trt
-      input_tensor: nchw
-      input_pixel_format: rgb
-      width: 320
-      height: 320
+      # [CPU MODE] Works immediately, no GPU setup needed.
+      cpu:
+        type: cpu
+      # ── SWITCH TO TENSORRT: replace the cpu block above with this ────────────
+      # tensorrt:
+      #   type: tensorrt
+      #   device: 0
+      # model:
+      #   path: /config/model_cache/tensorrt/yolov8n-320.trt
+      #   input_tensor: nchw
+      #   input_pixel_format: rgb
+      #   width: 320
+      #   height: 320
+      # ──────────────────────────────────────────────────────────────────────────
 
     ffmpeg:
-      # NVDEC hardware H.264/H.265 decode — offloads CPU, mandatory for 4+ cameras.
-      hwaccel_args: preset-nvidia-h264
-      # For H.265 (HEVC) cameras swap to: preset-nvidia-hevc
+      hwaccel_args: []
+      # ── SWITCH TO TENSORRT: replace hwaccel_args above with this ─────────────
+      # hwaccel_args: preset-nvidia-h264   # NVDEC hardware decode
+      # ──────────────────────────────────────────────────────────────────────────
 
     record:
       enabled: true
@@ -106,16 +96,9 @@ data:
       retain:
         default: 14
 
-    # ── License plate recognition (optional sidecar) ─────────────────────────
-    # Uncomment + deploy manifests/lpr.yaml (TBD) to enable offline LPR.
-    # Frigate will POST crop images of detected cars to the LPR service.
-    # lpr:
-    #   enabled: true
-    #   url: http://fast-plate-ocr.frigate.svc.cluster.local:8080
-
     cameras:
 
-      # ── Camera 1: Reolink RLC-510A (already wired) ──────────────────────────
+      # ── Camera 1: Reolink RLC-510A ────────────────────────────────────────────
       family_guardian:
         ffmpeg:
           inputs:
@@ -128,15 +111,11 @@ data:
         detect:
           width: 640
           height: 480
-          fps: 10        # bumped from 5 — TensorRT handles this easily
+          fps: 5
         objects:
           track: [person, car, dog, cat]
-        # Optional: mask out static areas to cut false positives (draw in UI)
-        # motion:
-        #   mask:
-        #     - "0,0,640,120"   # top 120px (sky / timestamp overlay)
 
-      # ── Camera 2 template (copy + fill in for each new camera) ──────────────
+      # ── Camera 2 template ─────────────────────────────────────────────────────
       # front_door:
       #   ffmpeg:
       #     inputs:
@@ -152,11 +131,7 @@ data:
       #     fps: 10
       #   objects:
       #     track: [person, car, package]
-      # ──────────────────────────────────────────────────────────────────────────
 ---
-# Camera passwords — one key per camera that has a unique password.
-# Reference in RTSP paths as {FRIGATE_<KEY_NAME_UPPERCASED>}.
-# Add more keys here and mount them in the Deployment env block below.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -164,8 +139,8 @@ metadata:
   namespace: frigate
 type: Opaque
 stringData:
-  rtsp_password: Sports22          # family_guardian (Reolink RLC-510A)
-  # front_door_password: yourpass  # front_door camera — add when you add that cam
+  rtsp_password: Sports22
+  # front_door_password: yourpass
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -177,7 +152,6 @@ spec:
   storageClassName: longhorn
   resources: { requests: { storage: 2Gi } }
 ---
-# Recordings + snapshots on NFS (~10GB/camera/day at 1080p continuous).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -203,35 +177,40 @@ spec:
     metadata:
       labels: { app: frigate }
     spec:
-      # Pin to the GPU node — TensorRT requires CUDA + the RTX 3060.
-      # To move Frigate to a Pi + Coral instead: remove nodeSelector +
-      # runtimeClassName, swap detector to edgetpu in the ConfigMap above.
-      nodeSelector:
-        kubernetes.io/hostname: delaplaine-server
-      runtimeClassName: nvidia
-      securityContext:
-        supplementalGroups: [44, 109]   # video + render groups for GPU access
+      # [CPU MODE] Runs on any node except rpi-node4 (longhorn issues there).
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: [rpi-node4]
+      # ── SWITCH TO TENSORRT: replace affinity above with these two lines ───────
+      # nodeSelector:
+      #   kubernetes.io/hostname: delaplaine-server
+      # runtimeClassName: nvidia
+      # ──────────────────────────────────────────────────────────────────────────
       containers:
         - name: frigate
-          image: ghcr.io/blakeblackshear/frigate:stable-tensorrt
+          # [CPU MODE]
+          image: ghcr.io/blakeblackshear/frigate:stable
+          # ── SWITCH TO TENSORRT: replace image above with this ─────────────────
+          # image: ghcr.io/blakeblackshear/frigate:stable-tensorrt
+          # ──────────────────────────────────────────────────────────────────────
           securityContext:
-            privileged: true   # needed for /dev/bus/usb (Coral) and /dev/dri (GPU)
+            privileged: true
           env:
             - name: FRIGATE_RTSP_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: frigate-camera-creds
                   key: rtsp_password
-            # Add more cameras' passwords here:
-            # - name: FRIGATE_FRONT_DOOR_PASSWORD
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: frigate-camera-creds
-            #       key: front_door_password
-            - name: NVIDIA_VISIBLE_DEVICES
-              value: all
-            - name: NVIDIA_DRIVER_CAPABILITIES
-              value: all
+            # Uncomment when using TensorRT:
+            # - name: NVIDIA_VISIBLE_DEVICES
+            #   value: all
+            # - name: NVIDIA_DRIVER_CAPABILITIES
+            #   value: all
           ports:
             - { name: web,  containerPort: 5000 }
             - { name: rtsp, containerPort: 8554 }
@@ -242,14 +221,18 @@ spec:
             - { name: dev-bus-usb, mountPath: /dev/bus/usb }
             - { name: shm, mountPath: /dev/shm }
           resources:
-            requests:
-              cpu: "1"
-              memory: "2Gi"
-              nvidia.com/gpu: "1"
-            limits:
-              cpu: "6"
-              memory: "8Gi"
-              nvidia.com/gpu: "1"
+            requests: { cpu: "200m", memory: "512Mi" }
+            limits:   { cpu: "4",    memory: "2Gi" }
+            # ── SWITCH TO TENSORRT: replace resources above with this ─────────
+            # requests:
+            #   cpu: "1"
+            #   memory: "2Gi"
+            #   nvidia.com/gpu: "1"
+            # limits:
+            #   cpu: "6"
+            #   memory: "8Gi"
+            #   nvidia.com/gpu: "1"
+            # ──────────────────────────────────────────────────────────────────
       volumes:
         - { name: config,    configMap: { name: frigate-config } }
         - name: configpvc
@@ -257,8 +240,7 @@ spec:
         - name: media
           persistentVolumeClaim: { claimName: frigate-media }
         - { name: dev-bus-usb, hostPath: { path: /dev/bus/usb } }
-        # 256Mi per camera at 5fps/640×480. Add ~128Mi per extra camera.
-        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 512Mi } }
+        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 256Mi } }
 ---
 apiVersion: v1
 kind: Service
@@ -271,7 +253,6 @@ spec:
     - { name: web,  port: 80,   targetPort: 5000 }
     - { name: rtsp, port: 8554, targetPort: 8554 }
 ---
-# LAN ingress (Authelia-protected).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
