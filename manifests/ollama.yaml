@@ -1,15 +1,34 @@
 ---
-# Ollama — local LLM runner. Open WebUI auto-discovers models served here via
-# OLLAMA_BASE_URL (already wired in chat-webui.yaml).
+# Ollama — local LLM runner with RTX 3060 GPU acceleration on ubuntu-server.
+# Open WebUI auto-discovers models via OLLAMA_BASE_URL (wired in chat-webui.yaml).
 #
-# Reality check on Pi 5 8GB: usable for `llama3.2:3b` (~3-5 tok/s, OK for
-# quick questions), painful for anything 7B+. Treat this as the "private /
-# offline" fallback; family will mostly use cloud models via OpenRouter.
+# RTX 3060 (12 GB VRAM): ~60 tok/s on 8B, ~35 tok/s on 13B. One model lives in
+# VRAM at a time; Ollama swaps on demand in ~2s. All models persist on the PVC.
 #
-# After applying, pull a model into the pod:
-#   kubectl -n ollama exec -it deploy/ollama -- ollama pull llama3.2:3b
-#   kubectl -n ollama exec -it deploy/ollama -- ollama pull qwen2.5:3b
-# Models persist on the PVC across pod restarts.
+# Prereqs:
+#   kubectl apply -f manifests/nvidia-device-plugin.yaml
+#   # confirm GPU is visible:
+#   kubectl get nodes -o json | jq '.items[].status.capacity["nvidia.com/gpu"]'
+#
+# ── Recommended model set ────────────────────────────────────────────────────
+# Pull all after first deploy (takes 10-30 min total depending on connection):
+#
+#   # General / family — fast, friendly, handles everyday Q&A + photo descriptions
+#   kubectl -n ollama exec -it deploy/ollama -- ollama pull llama3.1:8b
+#
+#   # Vision — image + photo uploads in Open WebUI (drag image into chat)
+#   kubectl -n ollama exec -it deploy/ollama -- ollama pull llava:13b
+#
+#   # Coding (for you) — best local code model; Python, Go, k8s YAML, Ansible
+#   kubectl -n ollama exec -it deploy/ollama -- ollama pull qwen2.5-coder:14b
+#
+# ── Short guide for Open WebUI ───────────────────────────────────────────────
+#   Parents / casual use  → pick llama3.1:8b  (fast, never confusing)
+#   Photo / image uploads → pick llava:13b    (drag image into the chat box)
+#   Coding help           → pick qwen2.5-coder:14b  (or Claude Sonnet via API)
+#   Document Q&A          → any model; attach PDF/text via the paperclip icon
+#
+# Models persist on the PVC across pod restarts — no re-pull needed.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -25,7 +44,7 @@ spec:
   storageClassName: local-path
   resources:
     requests:
-      storage: 30Gi
+      storage: 60Gi   # llama3.1:8b (~5GB) + llava:13b (~8GB) + qwen2.5-coder:14b (~9GB) + headroom
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -44,10 +63,9 @@ spec:
       labels:
         app: ollama
     spec:
-      # local-path PVs pin to whichever node the pod first lands on, so the
-      # first scheduling decision is sticky. Let the scheduler pick; if you'd
-      # rather force a specific node (e.g. a worker with the most free RAM),
-      # add `nodeName: rpi-node1` here before first apply.
+      nodeSelector:
+        kubernetes.io/hostname: delaplaine-server
+      runtimeClassName: nvidia
       containers:
         - name: ollama
           image: ollama/ollama:latest
@@ -63,11 +81,13 @@ spec:
               mountPath: /root/.ollama
           resources:
             requests:
-              cpu: "500m"
-              memory: "1Gi"
+              cpu: "2"
+              memory: "4Gi"
+              nvidia.com/gpu: "1"
             limits:
-              cpu: "4"      # let it eat all 4 cores during inference
-              memory: "6Gi" # leave headroom for k3s + other pods
+              cpu: "10"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
       volumes:
         - name: models
           persistentVolumeClaim:
