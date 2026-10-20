@@ -1,0 +1,248 @@
+# Radarr. Exported from the live cluster 2026-10-20.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: radarr
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-downloads
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 26Ti
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: radarr
+    name: radarr-downloads
+  nfs:
+    path: /mnt/tank/downloads
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-downloads-radarr
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 26Ti
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: radarr
+    name: radarr-downloads
+  nfs:
+    path: /mnt/tank/downloads
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-movies
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 26Ti
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: radarr
+    name: radarr-movies
+  nfs:
+    path: /mnt/tank/media/Movies
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-radarr-config
+spec:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 5Gi
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: radarr
+    name: radarr-config
+  nfs:
+    path: /mnt/tank/appdata/radarr
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: radarr-config
+  namespace: radarr
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: nfs-tank
+  volumeName: vault-radarr-config
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: radarr-downloads
+  namespace: radarr
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 26Ti
+  storageClassName: nfs-vault
+  volumeName: vault-downloads-radarr
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: radarr-movies
+  namespace: radarr
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 26Ti
+  storageClassName: nfs-vault
+  volumeName: vault-movies
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: radarr
+  namespace: radarr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: radarr
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: radarr
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - rpi-node4
+      containers:
+      - env:
+        - name: TZ
+          value: America/Los_Angeles
+        - name: PUID
+          value: '1000'
+        - name: PGID
+          value: '1000'
+        image: lscr.io/linuxserver/radarr:latest
+        imagePullPolicy: Always
+        name: radarr
+        ports:
+        - containerPort: 7878
+          protocol: TCP
+        resources:
+          limits:
+            cpu: '1'
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        volumeMounts:
+        - mountPath: /config
+          name: config
+        - mountPath: /movies
+          name: movies
+        - mountPath: /downloads
+          name: downloads
+      volumes:
+      - name: config
+        persistentVolumeClaim:
+          claimName: radarr-config
+      - name: movies
+        persistentVolumeClaim:
+          claimName: radarr-movies
+      - name: downloads
+        persistentVolumeClaim:
+          claimName: radarr-downloads
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: radarr
+  namespace: radarr
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 7878
+  - name: radarr
+    port: 7878
+    protocol: TCP
+    targetPort: 7878
+  selector:
+    app: radarr
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+  name: radarr
+  namespace: radarr
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: radarr.192.168.4.27.nip.io
+    http:
+      paths:
+      - backend:
+          service:
+            name: radarr
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  - host: radarr.bluebuck-micro.ts.net
+    http:
+      paths:
+      - backend:
+          service:
+            name: radarr
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  tls:
+  - hosts:
+    - radarr.192.168.4.27.nip.io
+    - radarr.bluebuck-micro.ts.net
+    secretName: radarr-tls

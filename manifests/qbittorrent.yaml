@@ -1,0 +1,315 @@
+# qBittorrent behind gluetun (Mullvad WireGuard). Exported from the live
+# cluster 2026-10-20.
+#
+# Kill switch: gluetun's firewall drops all traffic except tun0, the Mullvad
+# endpoint and FIREWALL_OUTBOUND_SUBNETS. qBittorrent is also bound to tun0
+# (Session\Interface=tun0 in /config, set via the WebUI API), so it can't use
+# eth0 even if the firewall is off.
+#
+# Needs the `mullvad` Secret (not in git):
+#   kubectl -n qbittorrent create secret generic mullvad \
+#     --from-literal=account=<account number> \
+#     --from-literal=wireguard-private-key=<PrivateKey from a Mullvad WG config>
+# WIREGUARD_ADDRESSES must match that key's device on mullvad.net (currently
+# device "Aware Emu").
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: qbittorrent
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-downloads-qbt
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 26Ti
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: qbittorrent
+    name: qbittorrent-downloads
+  nfs:
+    path: /mnt/tank/downloads
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-qbt-config
+spec:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 5Gi
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: qbittorrent
+    name: qbittorrent-config
+  nfs:
+    path: /mnt/tank/appdata/qbittorrent
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qbittorrent-config
+  namespace: qbittorrent
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: nfs-vault
+  volumeName: vault-qbt-config
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qbittorrent-downloads
+  namespace: qbittorrent
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 26Ti
+  storageClassName: nfs-vault
+  volumeName: vault-downloads-qbt
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: qbittorrent-isolation
+  namespace: qbittorrent
+spec:
+  egress:
+  - {}
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+    ports:
+    - port: 8080
+      protocol: TCP
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: radarr
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: sonarr
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: readarr
+    ports:
+    - port: 8080
+      protocol: TCP
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: tailscale
+      podSelector:
+        matchLabels:
+          tailscale.com/parent-resource: qbittorrent-ts
+    ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: qbittorrent
+  policyTypes:
+  - Egress
+  - Ingress
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qbittorrent
+  namespace: qbittorrent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qbittorrent
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: qbittorrent
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - rpi-node4
+      containers:
+      - env:
+        - name: VPN_SERVICE_PROVIDER
+          value: mullvad
+        - name: VPN_TYPE
+          value: wireguard
+        - name: WIREGUARD_PRIVATE_KEY
+          valueFrom:
+            secretKeyRef:
+              key: wireguard-private-key
+              name: mullvad
+        - name: MULLVAD_ACCOUNT
+          valueFrom:
+            secretKeyRef:
+              key: account
+              name: mullvad
+        - name: WIREGUARD_ADDRESSES
+          value: 10.69.193.148/32
+        - name: SERVER_COUNTRIES
+          value: USA
+        - name: DOT_PROVIDERS
+          value: cloudflare
+        - name: FIREWALL_OUTBOUND_SUBNETS
+          value: 10.42.0.0/16,10.43.0.0/16,192.168.4.0/24
+        - name: TZ
+          value: America/Los_Angeles
+        image: qmcgaw/gluetun:latest
+        imagePullPolicy: Always
+        name: gluetun
+        ports:
+        - containerPort: 8888
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+      - env:
+        - name: TZ
+          value: America/Los_Angeles
+        - name: PUID
+          value: '1000'
+        - name: PGID
+          value: '1000'
+        - name: WEBUI_PORT
+          value: '8080'
+        image: lscr.io/linuxserver/qbittorrent:4.6.7
+        imagePullPolicy: Always
+        name: qbittorrent
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        resources:
+          limits:
+            cpu: '2'
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        volumeMounts:
+        - mountPath: /config
+          name: config
+        - mountPath: /downloads
+          name: downloads
+      volumes:
+      - name: config
+        persistentVolumeClaim:
+          claimName: qbittorrent-config
+      - name: downloads
+        persistentVolumeClaim:
+          claimName: qbittorrent-downloads
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qbittorrent
+  namespace: qbittorrent
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 8080
+  - name: qbt
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app: qbittorrent
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qbittorrent-torrents
+  namespace: qbittorrent
+spec:
+  externalTrafficPolicy: Cluster
+  ports:
+  - name: tcp
+    nodePort: 30681
+    port: 6881
+    protocol: TCP
+    targetPort: 6881
+  - name: udp
+    nodePort: 30681
+    port: 6881
+    protocol: UDP
+    targetPort: 6881
+  selector:
+    app: qbittorrent
+  type: NodePort
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+    nginx.ingress.kubernetes.io/proxy-body-size: '0'
+  name: qbittorrent
+  namespace: qbittorrent
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: qbittorrent.192.168.4.27.nip.io
+    http:
+      paths:
+      - backend:
+          service:
+            name: qbittorrent
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  - host: qbittorrent.bluebuck-micro.ts.net
+    http:
+      paths:
+      - backend:
+          service:
+            name: qbittorrent
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  tls:
+  - hosts:
+    - qbittorrent.192.168.4.27.nip.io
+    - qbittorrent.bluebuck-micro.ts.net
+    secretName: qbittorrent-tls

@@ -61,7 +61,7 @@ metadata:
   namespace: homepage
 data:
   settings.yaml: |
-    title: rpi-cluster
+    title: homelab
     theme: dark
     color: slate
     headerStyle: clean
@@ -73,24 +73,31 @@ data:
       Family:
         style: row
         columns: 4
+      Paperless:
+        style: row
+        columns: 4
+      Media:
+        style: row
+        columns: 4
+      Gaming:
+        style: row
+        columns: 4
       Admin:
         style: row
         columns: 4
       Claude:
         style: row
         columns: 4
-
   bookmarks.yaml: |
     - Docs:
         - PROGRESS:
             - abbr: PG
               href: https://github.com
-
   services.yaml: |
     - Family:
         - Chat (AI):
             href: https://chat.bluebuck-micro.ts.net
-            description: Open WebUI — Claude/GPT/Llama via OpenRouter, plus local Ollama
+            description: Open WebUI — local LLMs on the Strix Halo box (Qwen3-Coder-30B, gpt-oss-120b) via Lemonade
             icon: open-webui.png
         - Nextcloud:
             href: https://cloud.bluebuck-micro.ts.net
@@ -100,6 +107,10 @@ data:
             href: https://recipes.bluebuck-micro.ts.net
             description: Family recipe book + meal planner
             icon: mealie.png
+        - Fitness (SparkyFitness):
+            href: https://fitness.bluebuck-micro.ts.net
+            description: Calorie & macro tracker — snap a photo of your meal for AI analysis
+            icon: sparkyfitness.png
         - Audiobooks:
             href: https://audiobooks.bluebuck-micro.ts.net
             description: Audiobook + podcast server
@@ -124,6 +135,57 @@ data:
             href: https://matrix.bluebuck-micro.ts.net
             description: Federated chat — E2E encrypted rooms, voice/video
             icon: matrix.png
+
+    - Paperless:
+        - Paperless-ngx:
+            href: https://paperless.bluebuck-micro.ts.net
+            description: Document management — scan, OCR, tag and search all your documents
+            icon: paperless-ngx.png
+
+    - Media:
+        - Jellyseerr:
+            href: https://jellyseerr.bluebuck-micro.ts.net
+            description: Request movies & TV shows — syncs with Radarr/Sonarr
+            icon: jellyseerr.png
+        - Radarr:
+            href: https://radarr.bluebuck-micro.ts.net
+            description: Movie library manager — monitors and organizes movies
+            icon: radarr.png
+        - Sonarr:
+            href: https://sonarr.bluebuck-micro.ts.net
+            description: TV show library manager — monitors and organizes series
+            icon: sonarr.png
+        - qBittorrent:
+            href: https://qbittorrent.bluebuck-micro.ts.net
+            description: Torrent client — all traffic routed through Mullvad VPN
+            icon: qbittorrent.png
+        - Prowlarr:
+            href: https://prowlarr.bluebuck-micro.ts.net
+            description: Indexer manager for Radarr and Sonarr
+            icon: prowlarr.png
+        - Bazarr:
+            href: https://bazarr.bluebuck-micro.ts.net
+            description: Automatic subtitle downloader for movies and TV shows
+            icon: bazarr.png
+
+        - Readarr:
+            href: https://readarr.bluebuck-micro.ts.net
+            description: Book library manager — monitors authors and organizes ebooks
+            icon: readarr.png
+        - Calibre-Web:
+            href: https://calibre.bluebuck-micro.ts.net
+            description: Ebook library — read in browser or sync to Kindle/Kobo
+            icon: calibre-web.png
+
+    - Gaming:
+        - Moonlight (Sunshine):
+            href: https://sunshine.bluebuck-micro.ts.net
+            description: Game streaming host — pair Moonlight clients here, launch Steam Big Picture
+            icon: sunshine.png
+        - Frigate (NVR):
+            href: https://frigate.bluebuck-micro.ts.net
+            description: NVR — object detection on local cameras
+            icon: frigate.png
 
     - Core:
         - Vaultwarden (Passwords):
@@ -150,28 +212,28 @@ data:
             icon: anthropic.png
 
     - Admin:
+        - n8n (Automation):
+            href: https://n8n.bluebuck-micro.ts.net
+            description: Workflow automation — cron jobs, service integrations, event triggers
+            icon: n8n.png
+        - JetKVM:
+            href: http://jetkvm.bluebuck-micro.ts.net
+            description: KVM-over-IP — remote console for delaplaine-server
+            icon: kvm.png
         - Rancher:
             href: https://rancher.bluebuck-micro.ts.net
             description: Kubernetes cluster UI
             icon: rancher.png
         - Grafana:
-            href: http://grafana.192.168.4.27.nip.io
-            description: Dashboards — per-Pi power, temps, pod CPU/mem
+            href: https://grafana.bluebuck-micro.ts.net
+            description: Dashboards — rack temps, fan RPM, UPS, cluster CPU/mem/network
             icon: grafana.png
         - Prometheus:
-            href: http://prometheus.192.168.4.27.nip.io
+            href: https://prometheus.bluebuck-micro.ts.net
             description: Metric store + PromQL — backend for Grafana
             icon: prometheus.png
-        - Frigate:
-            href: https://frigate.192.168.4.27.nip.io
-            description: NVR — object detection on local cameras
-            icon: frigate.png
-        - Glances:
-            href: http://192.168.4.27:61208
-            description: Per-host system monitor (DaemonSet, one per Pi)
-            icon: glances.png
-        - Authelia (auth):
-            href: https://auth.192.168.4.27.nip.io
+        - Authelia:
+            href: https://auth.bluebuck-micro.ts.net
             description: SSO + forward-auth gating every app behind this dashboard
             icon: authelia.png
         - Uptime Kuma:
@@ -187,7 +249,7 @@ data:
             description: Next.js app — Clerk auth, in progress
             icon: nextjs.png
         - Forgejo (Git):
-            href: http://git.192.168.4.27.nip.io
+            href: https://git.bluebuck-micro.ts.net
             description: Self-hosted Git — repos, issues, CI (Forgejo Actions)
             icon: forgejo.png
         - Registry (Container images):
@@ -195,15 +257,19 @@ data:
             description: Private OCI registry — docker push registry.bluebuck-micro.ts.net/<image>
             icon: docker.png
         - JupyterLab:
-            href: http://jupyter.192.168.4.27.nip.io
+            href: https://jupyter.bluebuck-micro.ts.net
             description: Notebooks for numerical methods / signal processing / labs
             icon: jupyter.png
+        - Glances:
+            href: http://192.168.4.27:61208
+            description: Per-host system monitor (DaemonSet, one per Pi)
+            icon: glances.png
         - Sandbox (Ubuntu shell):
-            href: https://github.com/ByVictorrr/rpi-cluster/blob/main/manifests/sandbox.yaml
+            href: https://github.com/ByVictorrr/homelab/blob/main/manifests/sandbox.yaml
             description: "kubectl -n sandbox exec -it deploy/sandbox -- bash  →  verilator, ghdl, ngspice, octave, RISC-V cross"
             icon: ubuntu.png
         - Kerneldev (SSH target):
-            href: https://github.com/ByVictorrr/rpi-cluster/blob/main/manifests/kerneldev.yaml
+            href: https://github.com/ByVictorrr/homelab/blob/main/manifests/kerneldev.yaml
             description: "ssh -p 30024 root@192.168.4.27 (after ssh-copy-id)  →  QEMU + gdb-multiarch for kernel modules"
             icon: linux.png
         - MQTT (Mosquitto):
@@ -214,7 +280,6 @@ data:
             href: https://github.com/ByVictorrr
             description: "Self-hosted Actions runners on k3s, label rpi-arm64. Autoscale 0→2. Add `runs-on: rpi-arm64` in workflows."
             icon: github-actions.png
-
   widgets.yaml: |
     - resources:
         backend: kubernetes
@@ -227,16 +292,14 @@ data:
           cpu: true
           memory: true
           showLabel: true
-          label: "rpi-cluster"
+          label: "homelab"
         nodes:
           show: true
           cpu: true
           memory: true
           showLabel: true
-
   kubernetes.yaml: |
     mode: cluster
-
   docker.yaml: |
     # not used — Kubernetes mode
 ---

@@ -1,0 +1,228 @@
+# Readarr. Exported from the live cluster 2026-10-20.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: readarr
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-books
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 26Ti
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: readarr
+    name: readarr-books
+  nfs:
+    path: /mnt/tank/books
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-downloads-readarr
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 26Ti
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: readarr
+    name: readarr-downloads
+  nfs:
+    path: /mnt/tank/downloads
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-readarr-config
+spec:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 5Gi
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: readarr
+    name: readarr-config
+  nfs:
+    path: /mnt/tank/appdata/readarr
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: readarr-books
+  namespace: readarr
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 26Ti
+  storageClassName: nfs-vault
+  volumeName: vault-books
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: readarr-config
+  namespace: readarr
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: nfs-vault
+  volumeName: vault-readarr-config
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: readarr-downloads
+  namespace: readarr
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 26Ti
+  storageClassName: nfs-vault
+  volumeName: vault-downloads-readarr
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: readarr
+  namespace: readarr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: readarr
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: readarr
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - rpi-node4
+      containers:
+      - env:
+        - name: TZ
+          value: America/Los_Angeles
+        - name: PUID
+          value: '1000'
+        - name: PGID
+          value: '1000'
+        image: docker.io/linuxserver/readarr:0.4.19-nightly
+        imagePullPolicy: IfNotPresent
+        name: readarr
+        ports:
+        - containerPort: 8787
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 128Mi
+        volumeMounts:
+        - mountPath: /config
+          name: config
+        - mountPath: /books
+          name: books
+        - mountPath: /downloads
+          name: downloads
+      volumes:
+      - name: config
+        persistentVolumeClaim:
+          claimName: readarr-config
+      - name: books
+        persistentVolumeClaim:
+          claimName: readarr-books
+      - name: downloads
+        persistentVolumeClaim:
+          claimName: readarr-downloads
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: readarr
+  namespace: readarr
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 8787
+  - name: readarr
+    port: 8787
+    protocol: TCP
+    targetPort: 8787
+  selector:
+    app: readarr
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+  name: readarr
+  namespace: readarr
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: readarr.192.168.4.27.nip.io
+    http:
+      paths:
+      - backend:
+          service:
+            name: readarr
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  - host: readarr.bluebuck-micro.ts.net
+    http:
+      paths:
+      - backend:
+          service:
+            name: readarr
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  tls:
+  - hosts:
+    - readarr.192.168.4.27.nip.io
+    - readarr.bluebuck-micro.ts.net
+    secretName: readarr-tls

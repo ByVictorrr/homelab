@@ -1,0 +1,144 @@
+# Seerr (successor to Jellyseerr; fallenbagel/jellyseerr is deprecated and
+# can't auth against Jellyfin >= 10.11/12.x). Exported from the live cluster
+# 2026-10-20. Seerr runs as uid 1000, so /app/config must be owned 1000:1000.
+# The pre-migration config backup is at /app/config/backup-jellyseerr-2.7.3-20261020.tgz.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jellyseerr
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-jellyseerr-config
+spec:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 5Gi
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: jellyseerr
+    name: jellyseerr-config
+  nfs:
+    path: /mnt/tank/appdata/jellyseerr
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jellyseerr-config
+  namespace: jellyseerr
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: nfs-vault
+  volumeName: vault-jellyseerr-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jellyseerr
+  namespace: jellyseerr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jellyseerr
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: jellyseerr
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - rpi-node4
+      containers:
+      - env:
+        - name: TZ
+          value: America/Los_Angeles
+        image: ghcr.io/seerr-team/seerr:v3.5.0
+        imagePullPolicy: Always
+        name: jellyseerr
+        ports:
+        - containerPort: 5055
+          protocol: TCP
+        resources:
+          limits:
+            cpu: '1'
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        volumeMounts:
+        - mountPath: /app/config
+          name: config
+      volumes:
+      - name: config
+        persistentVolumeClaim:
+          claimName: jellyseerr-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jellyseerr
+  namespace: jellyseerr
+spec:
+  ports:
+  - port: 80
+    protocol: TCP
+    targetPort: 5055
+  selector:
+    app: jellyseerr
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+  name: jellyseerr
+  namespace: jellyseerr
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: jellyseerr.192.168.4.27.nip.io
+    http:
+      paths:
+      - backend:
+          service:
+            name: jellyseerr
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  - host: jellyseerr.bluebuck-micro.ts.net
+    http:
+      paths:
+      - backend:
+          service:
+            name: jellyseerr
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  tls:
+  - hosts:
+    - jellyseerr.192.168.4.27.nip.io
+    - jellyseerr.bluebuck-micro.ts.net
+    secretName: jellyseerr-tls

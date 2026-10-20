@@ -1,0 +1,228 @@
+# Bazarr. Exported from the live cluster 2026-10-20.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bazarr
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-bazarr-config
+spec:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 5Gi
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: bazarr
+    name: bazarr-config
+  nfs:
+    path: /mnt/tank/appdata/bazarr
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-bazarr-movies
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 26Ti
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: bazarr
+    name: bazarr-movies
+  nfs:
+    path: /mnt/tank/media/Movies
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-bazarr-tv
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 26Ti
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: bazarr
+    name: bazarr-tv
+  nfs:
+    path: /mnt/tank/media/tv
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bazarr-config
+  namespace: bazarr
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: nfs-vault
+  volumeName: vault-bazarr-config
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bazarr-movies
+  namespace: bazarr
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 26Ti
+  storageClassName: nfs-vault
+  volumeName: vault-bazarr-movies
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bazarr-tv
+  namespace: bazarr
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 26Ti
+  storageClassName: nfs-vault
+  volumeName: vault-bazarr-tv
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bazarr
+  namespace: bazarr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bazarr
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: bazarr
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - rpi-node4
+      containers:
+      - env:
+        - name: TZ
+          value: America/Los_Angeles
+        - name: PUID
+          value: '1000'
+        - name: PGID
+          value: '1000'
+        image: lscr.io/linuxserver/bazarr:latest
+        imagePullPolicy: Always
+        name: bazarr
+        ports:
+        - containerPort: 6767
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 128Mi
+        volumeMounts:
+        - mountPath: /config
+          name: config
+        - mountPath: /movies
+          name: movies
+        - mountPath: /tv
+          name: tv
+      volumes:
+      - name: config
+        persistentVolumeClaim:
+          claimName: bazarr-config
+      - name: movies
+        persistentVolumeClaim:
+          claimName: bazarr-movies
+      - name: tv
+        persistentVolumeClaim:
+          claimName: bazarr-tv
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bazarr
+  namespace: bazarr
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 6767
+  - name: bazarr
+    port: 6767
+    protocol: TCP
+    targetPort: 6767
+  selector:
+    app: bazarr
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+  name: bazarr
+  namespace: bazarr
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: bazarr.192.168.4.27.nip.io
+    http:
+      paths:
+      - backend:
+          service:
+            name: bazarr
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  - host: bazarr.bluebuck-micro.ts.net
+    http:
+      paths:
+      - backend:
+          service:
+            name: bazarr
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  tls:
+  - hosts:
+    - bazarr.192.168.4.27.nip.io
+    - bazarr.bluebuck-micro.ts.net
+    secretName: bazarr-tls

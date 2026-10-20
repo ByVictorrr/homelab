@@ -1,0 +1,22 @@
+# Expose sonarr over Tailscale at https://sonarr.bluebuck-micro.ts.net.
+# http-redirect: the *arr login redirect is absolute http://, which
+# fails on a 443-only ts ingress without it.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    tailscale.com/hostname: sonarr
+    tailscale.com/http-redirect: 'true'
+  name: sonarr-ts
+  namespace: sonarr
+spec:
+  defaultBackend:
+    service:
+      name: sonarr
+      port:
+        number: 80
+  ingressClassName: tailscale
+  tls:
+  - hosts:
+    - sonarr
