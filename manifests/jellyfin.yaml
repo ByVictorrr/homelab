@@ -94,7 +94,8 @@ spec:
               memory: "3Gi"
       volumes:
         - { name: config, persistentVolumeClaim: { claimName: jellyfin-config } }
-        - { name: cache,  emptyDir: { sizeLimit: 10Gi }  # transcodes; 2Gi got the pod evicted mid-stream }
+        # 10Gi for transcodes; 2Gi got the pod evicted mid-stream
+        - { name: cache,  emptyDir: { sizeLimit: 10Gi } }
         - { name: media,  persistentVolumeClaim: { claimName: jellyfin-media } }
         # Example replacement for `media` if you have a USB drive on rpi-node1
         # mounted at /mnt/media:
