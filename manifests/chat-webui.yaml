@@ -67,6 +67,10 @@ spec:
             # Settings → Admin → Users before they can chat. Family-safe default.
             - name: DEFAULT_USER_ROLE
               value: "pending"
+            # Non-admin family members see every model without per-model sharing
+            # (otherwise "user" accounts get an empty model picker).
+            - name: BYPASS_MODEL_ACCESS_CONTROL
+              value: "true"
             - name: ENABLE_SIGNUP
               value: "True"
             # Claude API — enables claude-sonnet-4-6 / claude-opus-4-7 in the model
