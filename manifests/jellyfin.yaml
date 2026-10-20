@@ -30,17 +30,17 @@ metadata:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: jellyfin-config
+  name: jellyfin-config-halo
   namespace: jellyfin
 spec:
+  # local-path on amd-halo (moved off rpi-node3 2026-10-20; the old
+  # `jellyfin-config` PVC on rpi-node3 is kept as a backup).
   accessModes: [ReadWriteOnce]
   storageClassName: local-path
   resources:
     requests:
-      storage: 10Gi
+      storage: 20Gi
 ---
-# Placeholder media volume. Replace with hostPath (USB drive) or NFS before
-# putting real media in — local-path on a Pi SD card is too small for libraries.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -48,11 +48,11 @@ metadata:
   namespace: jellyfin
 spec:
   accessModes: [ReadWriteMany]
-  storageClassName: nfs-tank
-  volumeName: tank-media          # 192.168.4.32:/mnt/tank/media (see manifests/tank-storage.yaml)
+  storageClassName: nfs-vault
+  volumeName: vault-media         # 192.168.4.50:/mnt/tank/media (rpi-node4 HDDs)
   resources:
     requests:
-      storage: 24Ti
+      storage: 26Ti
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -71,6 +71,15 @@ spec:
       labels:
         app: jellyfin
     spec:
+      # Runs on amd-halo (Strix Halo, 32 cores) instead of a Pi. The node is
+      # tainted dedicated=media so nothing else lands there; limits below keep
+      # Jellyfin from competing with the local LLMs on that box.
+      # GPU (VAAPI on the Radeon 8060S) is not wired up yet: it needs the AMD
+      # device plugin (amd.com/gpu) or /dev/dri access.
+      nodeSelector:
+        kubernetes.io/hostname: amd-halo
+      tolerations:
+        - { key: dedicated, value: media, effect: NoSchedule }
       containers:
         - name: jellyfin
           image: jellyfin/jellyfin:latest
@@ -87,13 +96,13 @@ spec:
             - { name: media,  mountPath: /media }
           resources:
             requests:
-              cpu: "200m"
-              memory: "512Mi"
+              cpu: 500m
+              memory: 1Gi
             limits:
               cpu: "4"
-              memory: "3Gi"
+              memory: 4Gi
       volumes:
-        - { name: config, persistentVolumeClaim: { claimName: jellyfin-config } }
+        - { name: config, persistentVolumeClaim: { claimName: jellyfin-config-halo } }
         # 10Gi for transcodes; 2Gi got the pod evicted mid-stream
         - { name: cache,  emptyDir: { sizeLimit: 10Gi } }
         - { name: media,  persistentVolumeClaim: { claimName: jellyfin-media } }
