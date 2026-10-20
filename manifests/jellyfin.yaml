@@ -157,3 +157,16 @@ spec:
                 name: jellyfin
                 port:
                   number: 80
+---
+# Plain-HTTP LAN access for TVs/Rokus that can't run Tailscale or trust the
+# cluster CA: http://192.168.4.53:30096 (any node IP works). LAN only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: jellyfin-lan
+  namespace: jellyfin
+spec:
+  type: NodePort
+  selector: { app: jellyfin }
+  ports:
+    - { name: http, port: 8096, targetPort: 8096, nodePort: 30096 }
