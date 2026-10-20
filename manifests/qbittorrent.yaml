@@ -92,8 +92,21 @@ metadata:
   name: qbittorrent-isolation
   namespace: qbittorrent
 spec:
+  # Egress: only the WireGuard tunnel (UDP 51820 to any Mullvad server) and
+  # in-cluster traffic. Third layer under gluetun's firewall and qBittorrent's
+  # tun0 binding: even if gluetun failed open, nothing else can leave the pod.
   egress:
-  - {}
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: UDP
+      port: 51820
+  - to:
+    - ipBlock:
+        cidr: 10.42.0.0/16
+    - ipBlock:
+        cidr: 10.43.0.0/16
   ingress:
   - from:
     - namespaceSelector:
