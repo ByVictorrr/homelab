@@ -155,6 +155,10 @@ data:
             href: https://sonarr.bluebuck-micro.ts.net
             description: TV show library manager — monitors and organizes series
             icon: sonarr.png
+        - Lidarr:
+            href: https://lidarr.bluebuck-micro.ts.net
+            description: Music library manager — add artists, albums download to Jellyfin Music
+            icon: lidarr.png
         - qBittorrent:
             href: https://qbittorrent.bluebuck-micro.ts.net
             description: Torrent client — all traffic routed through Mullvad VPN

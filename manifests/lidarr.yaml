@@ -1,0 +1,230 @@
+# Lidarr (music version of Radarr/Sonarr). Downloads through Prowlarr +
+# qBittorrent (VPN-only) into /mnt/tank/media/music, which Jellyfin reads as
+# its Music library (/media/music).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lidarr
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-downloads-lidarr
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 26Ti
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: lidarr
+    name: lidarr-downloads
+  nfs:
+    path: /mnt/tank/downloads
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-music
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 26Ti
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: lidarr
+    name: lidarr-music
+  nfs:
+    path: /mnt/tank/media/music
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-lidarr-config
+spec:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 5Gi
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: lidarr
+    name: lidarr-config
+  nfs:
+    path: /mnt/tank/appdata/lidarr
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lidarr-config
+  namespace: lidarr
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: nfs-vault
+  volumeName: vault-lidarr-config
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lidarr-downloads
+  namespace: lidarr
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 26Ti
+  storageClassName: nfs-vault
+  volumeName: vault-downloads-lidarr
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lidarr-music
+  namespace: lidarr
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 26Ti
+  storageClassName: nfs-vault
+  volumeName: vault-music
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lidarr
+  namespace: lidarr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lidarr
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: lidarr
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - rpi-node4
+      containers:
+      - env:
+        - name: TZ
+          value: America/Los_Angeles
+        - name: PUID
+          value: '1000'
+        - name: PGID
+          value: '1000'
+        image: lscr.io/linuxserver/lidarr:latest
+        imagePullPolicy: Always
+        name: lidarr
+        ports:
+        - containerPort: 8686
+          protocol: TCP
+        resources:
+          limits:
+            cpu: '1'
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        volumeMounts:
+        - mountPath: /config
+          name: config
+        - mountPath: /music
+          name: music
+        - mountPath: /downloads
+          name: downloads
+      volumes:
+      - name: config
+        persistentVolumeClaim:
+          claimName: lidarr-config
+      - name: music
+        persistentVolumeClaim:
+          claimName: lidarr-music
+      - name: downloads
+        persistentVolumeClaim:
+          claimName: lidarr-downloads
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lidarr
+  namespace: lidarr
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 8686
+  - name: lidarr
+    port: 8686
+    protocol: TCP
+    targetPort: 8686
+  selector:
+    app: lidarr
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+  name: lidarr
+  namespace: lidarr
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: lidarr.192.168.4.27.nip.io
+    http:
+      paths:
+      - backend:
+          service:
+            name: lidarr
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  - host: lidarr.bluebuck-micro.ts.net
+    http:
+      paths:
+      - backend:
+          service:
+            name: lidarr
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  tls:
+  - hosts:
+    - lidarr.192.168.4.27.nip.io
+    - lidarr.bluebuck-micro.ts.net
+    secretName: lidarr-tls

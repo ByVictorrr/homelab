@@ -125,6 +125,9 @@ spec:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: readarr
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: lidarr
     ports:
     - port: 8080
       protocol: TCP
