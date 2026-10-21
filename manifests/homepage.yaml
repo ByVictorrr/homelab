@@ -286,6 +286,12 @@ data:
         expanded: true
         cpu: true
         memory: true
+    # Free space on the mergerfs pool (all the big drives on rpi-node4),
+    # read via the read-only NFS mount below.
+    - resources:
+        label: Storage
+        expanded: true
+        disk: /mnt/tank
     - kubernetes:
         cluster:
           show: true
@@ -351,6 +357,9 @@ spec:
               mountPath: /app/config
             - name: logs
               mountPath: /app/config/logs
+            - name: tank
+              mountPath: /mnt/tank
+              readOnly: true
           resources:
             requests:
               cpu: "50m"
@@ -366,6 +375,11 @@ spec:
           emptyDir: {}
         - name: logs
           emptyDir: {}
+        - name: tank
+          nfs:
+            server: 192.168.4.50
+            path: /mnt/tank
+            readOnly: true
 ---
 apiVersion: v1
 kind: Service
