@@ -159,6 +159,10 @@ data:
             href: https://lidarr.bluebuck-micro.ts.net
             description: Music library manager — add artists, albums download to Jellyfin Music
             icon: lidarr.png
+        - Ombi:
+            href: https://ombi.bluebuck-micro.ts.net
+            description: Request music — sign in with your Jellyfin login
+            icon: ombi.png
         - qBittorrent:
             href: https://qbittorrent.bluebuck-micro.ts.net
             description: Torrent client — all traffic routed through Mullvad VPN

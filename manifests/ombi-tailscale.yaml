@@ -1,0 +1,20 @@
+# Expose ombi over Tailscale at https://ombi.bluebuck-micro.ts.net.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    tailscale.com/hostname: ombi
+    tailscale.com/http-redirect: 'true'
+  name: ombi-ts
+  namespace: ombi
+spec:
+  defaultBackend:
+    service:
+      name: ombi
+      port:
+        number: 80
+  ingressClassName: tailscale
+  tls:
+  - hosts:
+    - ombi

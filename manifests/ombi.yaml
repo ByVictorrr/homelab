@@ -1,0 +1,155 @@
+# Ombi: request page for music (Seerr doesn't do music). Family sign in with
+# their Jellyfin login; music requests go to Lidarr (auto-approved).
+#
+# Ombi still uses the legacy X-Emby-Token header, so Jellyfin 12 needs
+# <EnableLegacyAuthorization>true</EnableLegacyAuthorization> in system.xml.
+# Backup admin login is in the `ombi-admin` Secret (not in git).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ombi
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: vault-ombi-config
+spec:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 5Gi
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: ombi
+    name: ombi-config
+  nfs:
+    path: /mnt/tank/appdata/ombi
+    server: 192.168.4.50
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-vault
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ombi-config
+  namespace: ombi
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: nfs-vault
+  volumeName: vault-ombi-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ombi
+  namespace: ombi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ombi
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: ombi
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - rpi-node4
+      containers:
+      - env:
+        - name: TZ
+          value: America/Los_Angeles
+        - name: PUID
+          value: '1000'
+        - name: PGID
+          value: '1000'
+        image: lscr.io/linuxserver/ombi:latest
+        imagePullPolicy: Always
+        name: ombi
+        ports:
+        - containerPort: 3579
+          protocol: TCP
+        resources:
+          limits:
+            cpu: '1'
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        volumeMounts:
+        - mountPath: /config
+          name: config
+      volumes:
+      - name: config
+        persistentVolumeClaim:
+          claimName: ombi-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ombi
+  namespace: ombi
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 3579
+  - name: ombi
+    port: 3579
+    protocol: TCP
+    targetPort: 3579
+  selector:
+    app: ombi
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+  name: ombi
+  namespace: ombi
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: ombi.192.168.4.27.nip.io
+    http:
+      paths:
+      - backend:
+          service:
+            name: ombi
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  - host: ombi.bluebuck-micro.ts.net
+    http:
+      paths:
+      - backend:
+          service:
+            name: ombi
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+  tls:
+  - hosts:
+    - ombi.192.168.4.27.nip.io
+    - ombi.bluebuck-micro.ts.net
+    secretName: ombi-tls
