@@ -159,15 +159,20 @@ spec:
           name: config
         - mountPath: /books
           name: books
+          subPath: books
         - mountPath: /downloads
           name: downloads
       volumes:
       - name: config
         persistentVolumeClaim:
           claimName: readarr-config
+      # The /mnt/tank/books export started returning "Stale file handle" on
+      # fresh mounts from every node (2026-10-22); mounting the pool root and
+      # using subPath works.
       - name: books
-        persistentVolumeClaim:
-          claimName: readarr-books
+        nfs:
+          server: 192.168.4.50
+          path: /mnt/tank
       - name: downloads
         persistentVolumeClaim:
           claimName: readarr-downloads

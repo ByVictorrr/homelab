@@ -1,0 +1,85 @@
+# Whisper ASR (faster-whisper, CPU) on amd-halo. Bazarr's "whisperai" provider
+# sends episode audio here and gets back generated English captions, so every
+# show gets subtitles even when no subtitle site has them.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: whisper
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: whisper-models
+  namespace: whisper
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whisper
+  namespace: whisper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whisper
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: whisper
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: amd-halo
+      tolerations:
+      - key: dedicated
+        operator: Equal
+        value: media
+        effect: NoSchedule
+      containers:
+      - name: whisper
+        image: onerahmet/openai-whisper-asr-webservice:latest
+        env:
+        - name: ASR_ENGINE
+          value: faster_whisper
+        - name: ASR_MODEL
+          value: distil-large-v3
+        - name: ASR_MODEL_PATH
+          value: /data/models
+        ports:
+        - containerPort: 9000
+        resources:
+          requests:
+            cpu: '1'
+            memory: 2Gi
+          limits:
+            # Leaves cores for Jellyfin transcodes and Lemonade.
+            cpu: '12'
+            memory: 8Gi
+        volumeMounts:
+        - name: models
+          mountPath: /data/models
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: whisper-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whisper
+  namespace: whisper
+spec:
+  selector:
+    app: whisper
+  ports:
+  - name: http
+    port: 9000
+    targetPort: 9000
